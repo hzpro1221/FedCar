@@ -9,3 +9,5 @@ torchvision
 torchaudio
 imageio
 opencv-python
+transformers
+ray

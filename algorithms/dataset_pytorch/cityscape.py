@@ -74,8 +74,8 @@ class CityscapesDataset(Dataset):
         image = Image.open(img_path).convert('RGB')
         mask = Image.open(mask_path).convert('L')
 
-        image = image.resize(self.target_size, Image.BILINEAR)
-        mask = mask.resize(self.target_size, Image.NEAREST)
+        image = image.resize(self.image_size, Image.BILINEAR)
+        mask = mask.resize(self.image_size, Image.NEAREST)
 
         image = torch.from_numpy(np.array(image)).permute(2, 0, 1).float() / 255.0
         

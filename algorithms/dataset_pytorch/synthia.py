@@ -74,6 +74,7 @@ class SynthiaDataset(Dataset):
         if mask.ndim == 3:
             mask = mask[:, :, 2]        
 
+        image = Image.open(img_path).convert('RGB')
         mask = Image.fromarray(mask.astype(np.uint8))
 
         image = image.resize(self.image_size, Image.BILINEAR)

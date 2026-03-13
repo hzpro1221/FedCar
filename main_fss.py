@@ -1,0 +1,132 @@
+import sys
+import os
+import json 
+import numpy as np 
+
+project_root = "/root/KhaiDD/FedCar"
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
+import ray
+import torch
+from algorithms.fdg_css.fedavg.fedavg_server import FedAvg_Server
+from algorithms.backbone.segformer_b0 import SegFormerB0
+
+# ==========================================
+# EXPERIMENT CONFIGURATIONS
+# ==========================================
+ALGORITHMS = ["fedavg"] 
+
+# Leave-One-Domain-Out Setup
+ALL_DOMAINS = ["cityscape", "gta5", "mapillary", "synthia", "bdd100"]
+
+NUM_ROUNDS = 40
+NUM_EPOCHS = 5
+BATCH_SIZE = 8
+INIT_LR = 1e-3
+MIN_LR = 2e-4
+POWER = 0.9
+WEIGHT_DECAY = 0.01
+SEEDS = [2024, 2025, 2026]  
+
+# Hard fix
+NUM_CLASSES = 19
+
+CHECKPOINT_DIR = "checkpoints"
+RESULTS_DIR = "results/fedavg"
+# ==========================================
+
+def main():
+    if not ray.is_initialized():
+        ray.init(ignore_reinit_error=True)
+
+    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+
+    experiment_results = {}
+
+    for algo in ALGORITHMS:
+        print(f"\n{'='*60}")
+        print(f"[Experiment] Starting runs for algorithm: {algo.upper()}")
+        print(f"{'='*60}")
+        
+        experiment_results[algo] = {}
+
+        # --- LEAVE-ONE-DOMAIN-OUT LOOP ---
+        for target_domain in ALL_DOMAINS:
+            source_domains = [d for d in ALL_DOMAINS if d != target_domain]
+            
+            print(f"\n{'>'*50}")
+            print(f"[LODO] Target Domain: {target_domain.upper()}")
+            print(f"[LODO] Source Domains: {source_domains}")
+            print(f"{'>'*50}")
+
+            experiment_results[algo][target_domain] = {
+                "miou_list": [],
+                "pixel_acc_list": []
+            }
+
+            for seed in SEEDS:
+                print(f"\n--- Running {algo.upper()} | Target: {target_domain} | Seed: {seed} ---")
+                
+                checkpoint_filename = f"{algo}_target_{target_domain}_seed_{seed}.pth"
+                checkpoint_path = os.path.join(CHECKPOINT_DIR, checkpoint_filename)
+
+                global_backbone = SegFormerB0(num_classes=NUM_CLASSES)
+
+                if algo == "fedavg":
+                    server = FedAvg_Server(
+                        num_classes=NUM_CLASSES,
+                        backbone_model=global_backbone,
+                        source_domains=source_domains,
+                        num_rounds=NUM_ROUNDS,
+                        num_epochs=NUM_EPOCHS,
+                        batch_size=BATCH_SIZE,
+                        init_lr=INIT_LR,
+                        min_lr=MIN_LR,
+                        power=POWER,
+                        weight_decay=WEIGHT_DECAY
+                    )
+                else:
+                    raise NotImplementedError(f"Algorithm '{algo}' is not implemented yet.")
+
+                server.set_seed(seed)
+
+                server.train(checkpoint_path=checkpoint_path)
+
+                miou, pixel_acc, iou_per_class = server.evaluate(
+                    target_domain=target_domain, 
+                    checkpoint_path=checkpoint_path
+                )
+
+                experiment_results[algo][target_domain]["miou_list"].append(miou)
+                experiment_results[algo][target_domain]["pixel_acc_list"].append(pixel_acc)
+
+            miou_mean = np.mean(experiment_results[algo][target_domain]["miou_list"])
+            miou_std = np.std(experiment_results[algo][target_domain]["miou_list"])
+            
+            acc_mean = np.mean(experiment_results[algo][target_domain]["pixel_acc_list"])
+            acc_std = np.std(experiment_results[algo][target_domain]["pixel_acc_list"])
+
+            experiment_results[algo][target_domain]["aggregated"] = {
+                "miou_mean": miou_mean,
+                "miou_std": miou_std,
+                "pixel_acc_mean": acc_mean,
+                "pixel_acc_std": acc_std
+            }
+
+            print(f"\n{'='*40}")
+            print(f"Final Aggregated Results for Target: {target_domain.upper()}")
+            print(f"- mIoU: {miou_mean*100:.2f}% ± {miou_std*100:.2f}%")
+            print(f"- Pixel Accuracy: {acc_mean*100:.2f}% ± {acc_std*100:.2f}%")
+            print(f"{'='*40}")
+
+    results_file_path = os.path.join(RESULTS_DIR, "lodo_final_metrics.json")
+    with open(results_file_path, "w") as f:
+        json.dump(experiment_results, f, indent=4)
+    print(f"\n[Server] All LODO experiments complete. Results saved to {results_file_path}")
+
+    ray.shutdown()
+
+if __name__ == "__main__":
+    main()
