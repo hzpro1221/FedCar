@@ -2,3 +2,10 @@ appdirs
 requests
 tqdm
 kaggle
+numpy 
+pillow
+torch
+torchvision
+torchaudio
+imageio
+opencv-python
