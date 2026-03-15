@@ -2,6 +2,8 @@ import sys
 import os
 import json 
 import numpy as np 
+import time
+import gc
 
 project_root = "/root/KhaiDD/FedCar"
 if project_root not in sys.path:
@@ -19,10 +21,16 @@ from algorithms.fdg_css.fedsr.segformer_b0_sr import SegFormerB0_SR
 from algorithms.fdg_css.fedavg_ga.fedavg_ga_server import FedAvg_GA_Server
 from algorithms.fdg_css.fedavg_ga.segformer_b0_avg_ga import SegFormerB0_Avg_GA
 
+from algorithms.fdg_css.fedavg_omg.fedavg_omg_server import FedAvg_OMG_Server
+from algorithms.fdg_css.fedavg_omg.segformer_b0_avg_omg import SegFormerB0_Avg_OMG
+
+from algorithms.fdg_css.feddg.feddg_server import FedDG_Server
+from algorithms.fdg_css.feddg.segformer_b0_dg import SegFormerB0_DG
+
 # ==========================================
 # EXPERIMENT CONFIGURATIONS
 # ==========================================
-ALGORITHMS = ["fedavg+ga"] # ["fedavg", "fedsr", "fedavg+ga"] 
+ALGORITHMS = ["feddg"] # ["fedavg", "fedsr", "fedavg+ga", "fedavg+omg", "feddg"] 
 
 # Leave-One-Domain-Out Setup
 ALL_DOMAINS = ["cityscape", "gta5", "mapillary"] # ["cityscape", "gta5", "mapillary", "synthia", "bdd100"]
@@ -124,12 +132,53 @@ def main():
                         power=POWER,
                         weight_decay=WEIGHT_DECAY
                     )
+                elif algo == "fedavg+omg":
+                    global_backbone = SegFormerB0_Avg_OMG(num_classes=NUM_CLASSES)    
+
+                    server = FedAvg_OMG_Server(
+                        num_classes=NUM_CLASSES,
+                        backbone_model=global_backbone,
+                        source_domains=source_domains,
+                        num_rounds=NUM_ROUNDS,
+                        num_epochs=NUM_EPOCHS,
+                        batch_size=BATCH_SIZE,
+                        init_lr=INIT_LR,
+                        min_lr=MIN_LR,
+                        power=POWER,
+                        weight_decay=WEIGHT_DECAY
+                    )   
+                elif algo == "feddg":
+                    global_backbone = SegFormerB0_DG(num_classes=NUM_CLASSES)    
+
+                    server = FedDG_Server(
+                        num_classes=NUM_CLASSES,
+                        backbone_model=global_backbone,
+                        source_domains=source_domains,
+                        num_rounds=NUM_ROUNDS,
+                        num_epochs=NUM_EPOCHS,
+                        batch_size=BATCH_SIZE,
+                        init_lr=INIT_LR,
+                        min_lr=MIN_LR,
+                        power=POWER,
+                        weight_decay=WEIGHT_DECAY
+                    )                                       
                 else:
                     raise NotImplementedError(f"Algorithm '{algo}' is not implemented yet.")
 
                 server.set_seed(seed)
 
                 server.train(checkpoint_path=checkpoint_path)
+
+                print("\n[Main] Terminating Ray clients to free VRAM for evaluation...")
+                if hasattr(server, 'clients'):
+                    for client in server.clients:
+                        ray.kill(client) 
+                    server.clients.clear() 
+                
+                gc.collect()
+                torch.cuda.empty_cache()
+                time.sleep(1)
+                print("[Main] VRAM cleared successfully.")
 
                 miou, pixel_acc, iou_per_class = server.evaluate(
                     target_domain=target_domain, 
@@ -138,6 +187,16 @@ def main():
 
                 experiment_results[algo][target_domain]["miou_list"].append(miou)
                 experiment_results[algo][target_domain]["pixel_acc_list"].append(pixel_acc)
+
+                print(f"[Main] Cleaning up {algo.upper()} server and backbone from VRAM...")
+                
+                del server
+                del global_backbone
+
+                gc.collect()
+                torch.cuda.empty_cache()
+                
+                print("[Main] Done. Ready for the next run.")
 
             miou_mean = np.mean(experiment_results[algo][target_domain]["miou_list"])
             miou_std = np.std(experiment_results[algo][target_domain]["miou_list"])
