@@ -15,9 +15,9 @@ from tqdm import tqdm
 
 from algorithms.dataset_pytorch import BDD100KDataset, CityscapesDataset, GTA5Dataset, MapillaryDataset, SynthiaDataset
 
-from .segformer_b0_centralized import SegFormerB0_Centralized
+from .segformer_b0_spc_net import SegFormerB0_SPC_Net
 
-class Centralized:
+class SPC_Net:
     def __init__(
         self, 
         num_classes,
@@ -28,15 +28,22 @@ class Centralized:
         min_lr,
         power,
         weight_decay,
-        max_steps_per_epch=50 # 10 * num_domain
+        max_steps_per_epch=10
     ):
         print("\n" + "="*50)
-        print("[Trainer] Initializing Centralized (Deep All) Trainer...")
+        print("[Trainer] Initializing SPC_Net Trainer...")
         self.num_classes = num_classes
 
-        self.backbone_model = SegFormerB0_Centralized(num_classes=self.num_classes)
+        self.backbone_model = SegFormerB0_SPC_Net(num_classes=self.num_classes)
         
         self.source_domains = source_domains
+        
+        num_datasets = len(self.source_domains)
+        self.backbone_model = SegFormerB0_SPC_Net(
+            num_classes=self.num_classes, 
+            num_datasets=num_datasets
+        )        
+        
         self.num_epochs = num_epochs
         self.batch_size = batch_size
         
@@ -44,7 +51,7 @@ class Centralized:
         self.min_lr = min_lr
         self.power = power
         self.weight_decay = weight_decay
-        self.max_steps_per_epch = max_steps_per_epch
+        self.max_steps_per_epch = max_steps_per_epch * len(self.source_domains)
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"[Trainer] Global device set to: {self.device}")
@@ -125,7 +132,7 @@ class Centralized:
         print(f"[Trainer] Global seed set to {seed}.")
 
     def train(self, checkpoint_path):
-        print(f"\n[Trainer] Starting Centralized Training for {self.num_epochs} epochs.")
+        print(f"\n[Trainer] Starting SPC_Net Training for {self.num_epochs} epochs.")
         self.backbone_model.train()
 
         epoch_pbar = tqdm(range(self.num_epochs), desc="Epochs", position=0)
@@ -185,8 +192,8 @@ class Centralized:
         elif target_domain == "gta5":
             dataset = GTA5Dataset(
                 list_of_paths=[
-                    "/root/KhaiDD/FedCar/dataset/gta5/gta5_part8",
-                    "/root/KhaiDD/FedCar/dataset/gta5/gta5_part9",
+                    # "/root/KhaiDD/FedCar/dataset/gta5/gta5_part8",
+                    # "/root/KhaiDD/FedCar/dataset/gta5/gta5_part9",
                     "/root/KhaiDD/FedCar/dataset/gta5/gta5_part10"
                 ]
             )

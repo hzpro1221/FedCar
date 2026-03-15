@@ -5,7 +5,7 @@ from transformers import SegformerConfig, SegformerForSemanticSegmentation
 
 class SegFormerB0_Centralized(nn.Module):
     def __init__(self, num_classes):
-        super(SegFormerB0_Avg, self).__init__()
+        super(SegFormerB0_Centralized, self).__init__()
         
         self.config = SegformerConfig(
             num_labels=num_classes,

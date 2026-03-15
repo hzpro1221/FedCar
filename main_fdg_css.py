@@ -33,7 +33,7 @@ from algorithms.fdg_css.gperxan.segformer_b0_gperxan import SegFormerB0_gPerXAN
 # ==========================================
 # EXPERIMENT CONFIGURATIONS
 # ==========================================
-ALGORITHMS = ["gperxan"] # ["fedavg", "fedsr", "fedavg+ga", "fedavg+omg", "feddg", gperxan] 
+ALGORITHMS = ["fedavg+ga"] # ["fedavg", "fedsr", "fedavg+ga", "fedavg+omg", "feddg", gperxan] 
 
 # Leave-One-Domain-Out Setup
 ALL_DOMAINS = ["cityscape", "gta5", "mapillary"] # ["cityscape", "gta5", "mapillary", "synthia", "bdd100"]
@@ -50,8 +50,8 @@ SEEDS = [2024, 2025, 2026]
 # Hard fix
 NUM_CLASSES = 19
 
-CHECKPOINT_DIR = "checkpoints"
-RESULTS_DIR = "results"
+CHECKPOINT_DIR = "checkpoints_fdg_css"
+RESULTS_DIR = "results_fdg_css"
 # ==========================================
 
 def main():

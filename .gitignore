@@ -4,6 +4,10 @@ dataset/gta5
 dataset/mapillary
 dataset/synthia
 venv
-checkpoints
-results
+checkpoints_css
+checkpoints_fdg_css
+checkpoints_fdgcss
+results_css
+results_fdg_css
+results_fdgcss
 **/__pycache__/

@@ -182,8 +182,8 @@ class gPerXAN_Server:
         elif target_domain == "gta5":
             dataset = GTA5Dataset(
                 list_of_paths=[
-                    "/root/KhaiDD/FedCar/dataset/gta5/gta5_part8",
-                    "/root/KhaiDD/FedCar/dataset/gta5/gta5_part9",
+                    # "/root/KhaiDD/FedCar/dataset/gta5/gta5_part8",
+                    # "/root/KhaiDD/FedCar/dataset/gta5/gta5_part9",
                     "/root/KhaiDD/FedCar/dataset/gta5/gta5_part10"
                 ]
             )

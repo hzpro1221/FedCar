@@ -11,12 +11,14 @@ if project_root not in sys.path:
 
 import torch
 
-from algorithms.centralized.centralized_trainer import Centralized
+from algorithms.css.centralized.centralized import Centralized
+from algorithms.css.spc_net.spc_net import SPC_Net 
+from algorithms.css.sens_aug.sens_aug import SensAug
 
 # ==========================================
 # EXPERIMENT CONFIGURATIONS
 # ==========================================
-ALGORITHMS = ["centralized"] 
+ALGORITHMS = ["sens_aug"] # ["centralized", "spc_net", "sens_aug"] 
 
 # Leave-One-Domain-Out Setup
 ALL_DOMAINS = ["cityscape", "gta5", "mapillary"] 
@@ -33,8 +35,8 @@ SEEDS = [2024, 2025, 2026]
 # Hard fix
 NUM_CLASSES = 19
 
-CHECKPOINT_DIR = "checkpoints"
-RESULTS_DIR = "results"
+CHECKPOINT_DIR = "checkpoints_css"
+RESULTS_DIR = "results_css"
 # ==========================================
 
 def main():
@@ -63,23 +65,48 @@ def main():
                 "miou_list": [],
                 "pixel_acc_list": []
             }
-
+            
             for seed in SEEDS:
                 print(f"\n--- Running {algo.upper()} | Target: {target_domain} | Seed: {seed} ---")
                 
                 checkpoint_filename = f"{algo}_target_{target_domain}_seed_{seed}.pth"
                 checkpoint_path = os.path.join(CHECKPOINT_DIR, checkpoint_filename)
 
-                trainer = Centralized(
-                    num_classes=NUM_CLASSES,
-                    source_domains=source_domains,
-                    num_epochs=TOTAL_EPOCHS,
-                    batch_size=BATCH_SIZE,
-                    init_lr=INIT_LR,
-                    min_lr=MIN_LR,
-                    power=POWER,
-                    weight_decay=WEIGHT_DECAY
-                )
+                if algo == "centralized":
+                    trainer = Centralized(
+                        num_classes=NUM_CLASSES,
+                        source_domains=source_domains,
+                        num_epochs=TOTAL_EPOCHS,
+                        batch_size=BATCH_SIZE,
+                        init_lr=INIT_LR,
+                        min_lr=MIN_LR,
+                        power=POWER,
+                        weight_decay=WEIGHT_DECAY
+                    )
+                elif algo == "spc_net":
+                    trainer = SPC_Net(
+                        num_classes=NUM_CLASSES,
+                        source_domains=source_domains,
+                        num_epochs=TOTAL_EPOCHS,
+                        batch_size=BATCH_SIZE,
+                        init_lr=INIT_LR,
+                        min_lr=MIN_LR,
+                        power=POWER,
+                        weight_decay=WEIGHT_DECAY                        
+                    )
+                elif algo == "sens_aug":
+                    trainer = SensAug(
+                        num_classes=NUM_CLASSES,
+                        source_domains=source_domains,
+                        num_epochs=TOTAL_EPOCHS,
+                        batch_size=BATCH_SIZE,
+                        init_lr=INIT_LR,
+                        min_lr=MIN_LR,
+                        power=POWER,
+                        weight_decay=WEIGHT_DECAY                        
+                    )
+                else:
+                    raise NotImplementedError(f"Algorithm '{algo}' is not implemented yet.")
 
                 trainer.set_seed(seed)
 

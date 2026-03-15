@@ -14,10 +14,10 @@ import ray
 
 from algorithms.dataset_pytorch import BDD100KDataset, CityscapesDataset, GTA5Dataset, MapillaryDataset, SynthiaDataset
 
-from .fedsr_client import FedSR_Client
-from .segformer_b0_sr import SegFormerB0_SR
+from .fedema_client import FedEMA_Client
+from .segformer_b0_ema import SegFormerB0_EMA
 
-class FedSR_Server:
+class FedEMA_Server:
     def __init__(
         self, 
         num_classes,
@@ -31,7 +31,8 @@ class FedSR_Server:
         min_lr,
         power,
         weight_decay,
-        z_dim=128
+        beta=0.9,           
+        lambda_ent=0.01
     ):
         """
         1. num_classess: number of class to classify.
@@ -45,7 +46,7 @@ class FedSR_Server:
         7. weight_decay: Used in AdamW optimizer (in this work, by default the optimizer will be AdamW optimizer)
         """
         print("\n" + "="*50)
-        print("[Server] Initializing FedSR Server...")
+        print("[Server] Initializing FedEMA Server...")
         self.num_classes = num_classes
         self.backbone_model = backbone_model
         self.source_domains = source_domains
@@ -57,35 +58,33 @@ class FedSR_Server:
         self.min_lr = min_lr
         self.power = power
         self.weight_decay = weight_decay
-        self.z_dim=z_dim
-
-        # :vv trivial.. but this is for identifing device (in case you don't know)
+        self.beta = beta
+        self.lambda_ent = lambda_ent
+        
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"[Server] Global device set to: {self.device}")
         print(f"[Server] Source domains registered: {self.source_domains}")
-        print(f"[Server] Communication Rounds: {self.num_rounds} | Local Epochs: {self.num_epochs}")
+        print(f"[Server] Beta EMA: {self.beta} | Lambda Entropy: {self.lambda_ent}")
 
         # For each domain -> we init a client, and assign a domain to him
         self.clients = []
         print("[Server] Initializing remote clients via Ray...")
         for i, domain in enumerate(self.source_domains):
             self.clients.append(
-                FedSR_Client.remote(
+                FedEMA_Client.remote(
                     data=domain,
                     client_id=i,
-                    local_model=SegFormerB0_SR(
+                    local_model=SegFormerB0_EMA(
                         num_classes=self.num_classes
                     ),
 
                     num_epoch=self.num_epochs,
                     batch_size=self.batch_size,
-                    num_classes=self.num_classes,
 
                     init_lr=self.init_lr,
                     min_lr=self.min_lr,
                     power=self.power,
-                    weight_decay=self.weight_decay,
-                    z_dim=self.z_dim
+                    weight_decay=self.weight_decay
                 )
             )
         print(f"[Server] Successfully initialized {len(self.clients)} remote clients.")
@@ -105,7 +104,7 @@ class FedSR_Server:
         """
         W_global = sum( (n_k / n_total) * W_k )
         """
-        print("[Server] Starting FedSR aggregation...")
+        print("[Server] Starting FedEMA aggregation...")
         total_samples = sum(total_samples_list)
         print(f"[Server] Total samples across all clients: {total_samples}")
         
@@ -124,39 +123,48 @@ class FedSR_Server:
         print("[Server] Aggregation complete.")
         return avg_weights
 
+    def update_ema(self, global_weights, aggregated_weights):
+        """
+        EMA Formulate: \omega_EMA^r = \beta \omega_EMA^{r-1} + (1 - \beta) \omega
+        """
+        for key in global_weights.keys():
+            if torch.is_floating_point(global_weights[key]):
+                global_weights[key] = self.beta * global_weights[key] + (1.0 - self.beta) * aggregated_weights[key]
+            else:
+                global_weights[key] = aggregated_weights[key]
+        return global_weights
+
     def train(self, checkpoint_path):
-        print(f"\n[Server] Commencing Federated Learning process for {self.num_rounds} rounds.")
-        global_weights = self.backbone_model.state_dict()
+        print(f"\n[Server] Commencing FedEMA Learning process for {self.num_rounds} rounds.")
+        
+        # Init \omega_EMA^0
+        global_ema_weights = self.backbone_model.state_dict()
         round_pbar = tqdm(range(self.num_rounds), desc="Round", position=0)
 
         for round_idx in round_pbar:
             print(f"\n--- [Server] Starting Round {round_idx + 1}/{self.num_rounds} ---")
-            print("[Server] Broadcasting global weights to all clients...")
+            
+            # Distribute \omega_EMA^{r-1} to clients
             job_ids = [
-                client.train.remote(
-                    global_parameters=global_weights
-                ) 
+                client.train.remote(global_parameters=global_ema_weights) 
                 for i, client in enumerate(self.clients)
             ]
 
-            print(f"[Server] Waiting for {len(self.clients)} clients to finish local training...")
             results = ray.get(job_ids)
-            print(f"[Server] Received local weights from all clients.")
             
             local_weights_list = [r[0] for r in results]
             total_samples_list = [r[1] for r in results]
 
-            global_weights = self.aggregate(
-                local_weights_list=local_weights_list, 
-                total_samples_list=total_samples_list
-            )
+            # Caculate \omega (FedAvg)
+            aggregated_weights = self.aggregate(local_weights_list, total_samples_list)
 
-            print("[Server] Updating global backbone model with aggregated weights.")
-            self.backbone_model.load_state_dict(global_weights)
+            # Update \omega_EMA^r 
+            global_ema_weights = self.update_ema(global_ema_weights, aggregated_weights)
+
+            self.backbone_model.load_state_dict(global_ema_weights)
             round_pbar.set_description(f"Num Finished Round {round_idx + 1}")
 
-        # save model after training
-        print(f"\n[Server] Training complete. Saving global model to {checkpoint_path}")
+        print(f"\n[Server] Training complete. Saving global EMA model to {checkpoint_path}")
         torch.save(self.backbone_model.state_dict(), checkpoint_path)
         return self.backbone_model
     
