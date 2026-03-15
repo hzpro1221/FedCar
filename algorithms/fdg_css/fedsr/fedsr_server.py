@@ -14,10 +14,10 @@ import ray
 
 from algorithms.dataset_pytorch import BDD100KDataset, CityscapesDataset, GTA5Dataset, MapillaryDataset, SynthiaDataset
 
-from .fedavg_client import FedAvg_Client
-from .segformer_b0_avg import SegFormerB0_Avg
+from .fedsr_client import FedSR_Client
+from .segformer_b0_sr import SegFormerB0_SR
 
-class FedAvg_Server:
+class FedSR_Server:
     def __init__(
         self, 
         num_classes,
@@ -30,7 +30,8 @@ class FedAvg_Server:
         init_lr,
         min_lr,
         power,
-        weight_decay
+        weight_decay,
+        z_dim=128
     ):
         """
         1. num_classess: number of class to classify.
@@ -44,7 +45,7 @@ class FedAvg_Server:
         7. weight_decay: Used in AdamW optimizer (in this work, by default the optimizer will be AdamW optimizer)
         """
         print("\n" + "="*50)
-        print("[Server] Initializing FedAvg Server...")
+        print("[Server] Initializing FedSR Server...")
         self.num_classes = num_classes
         self.backbone_model = backbone_model
         self.source_domains = source_domains
@@ -56,6 +57,7 @@ class FedAvg_Server:
         self.min_lr = min_lr
         self.power = power
         self.weight_decay = weight_decay
+        self.z_dim=z_dim
 
         # :vv trivial.. but this is for identifing device (in case you don't know)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -68,20 +70,22 @@ class FedAvg_Server:
         print("[Server] Initializing remote clients via Ray...")
         for i, domain in enumerate(self.source_domains):
             self.clients.append(
-                FedAvg_Client.remote(
+                FedSR_Client.remote(
                     data=domain,
                     client_id=i,
-                    local_model=SegFormerB0_Avg(
+                    local_model=SegFormerB0_SR(
                         num_classes=self.num_classes
                     ),
 
                     num_epoch=self.num_epochs,
                     batch_size=self.batch_size,
+                    num_classes=self.num_classes,
 
                     init_lr=self.init_lr,
                     min_lr=self.min_lr,
                     power=self.power,
-                    weight_decay=self.weight_decay
+                    weight_decay=self.weight_decay,
+                    z_dim=self.z_dim
                 )
             )
         print(f"[Server] Successfully initialized {len(self.clients)} remote clients.")
@@ -101,7 +105,7 @@ class FedAvg_Server:
         """
         W_global = sum( (n_k / n_total) * W_k )
         """
-        print("[Server] Starting FedAvg aggregation...")
+        print("[Server] Starting FedSR aggregation...")
         total_samples = sum(total_samples_list)
         print(f"[Server] Total samples across all clients: {total_samples}")
         

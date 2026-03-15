@@ -3,9 +3,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import SegformerConfig, SegformerForSemanticSegmentation
 
-class SegFormerB0(nn.Module):
+class SegFormerB0_Avg(nn.Module):
     def __init__(self, num_classes):
-        super(SegFormerB0, self).__init__()
+        super(SegFormerB0_Avg, self).__init__()
         
         self.config = SegformerConfig(
             num_labels=num_classes,

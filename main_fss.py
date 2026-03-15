@@ -9,21 +9,25 @@ if project_root not in sys.path:
 
 import ray
 import torch
+
 from algorithms.fdg_css.fedavg.fedavg_server import FedAvg_Server
-from algorithms.backbone.segformer_b0 import SegFormerB0
+from algorithms.fdg_css.fedavg.segformer_b0_avg import SegFormerB0_Avg
+
+from algorithms.fdg_css.fedsr.fedsr_server import FedSR_Server
+from algorithms.fdg_css.fedsr.segformer_b0_sr import SegFormerB0_SR
 
 # ==========================================
 # EXPERIMENT CONFIGURATIONS
 # ==========================================
-ALGORITHMS = ["fedavg"] 
+ALGORITHMS = ["fedsr"] # ["fedavg", "fedsr"] 
 
 # Leave-One-Domain-Out Setup
-ALL_DOMAINS = ["cityscape", "gta5", "mapillary", "synthia", "bdd100"]
+ALL_DOMAINS = ["cityscape", "gta5", "mapillary"] # ["cityscape", "gta5", "mapillary", "synthia", "bdd100"]
 
-NUM_ROUNDS = 40
-NUM_EPOCHS = 5
-BATCH_SIZE = 8
-INIT_LR = 1e-3
+NUM_ROUNDS = 10 # 40
+NUM_EPOCHS = 2 # 5
+BATCH_SIZE = 8 # 64
+INIT_LR = 1e-3 
 MIN_LR = 2e-4
 POWER = 0.9
 WEIGHT_DECAY = 0.01
@@ -72,10 +76,25 @@ def main():
                 checkpoint_filename = f"{algo}_target_{target_domain}_seed_{seed}.pth"
                 checkpoint_path = os.path.join(CHECKPOINT_DIR, checkpoint_filename)
 
-                global_backbone = SegFormerB0(num_classes=NUM_CLASSES)
-
                 if algo == "fedavg":
+                    global_backbone = SegFormerB0_Avg(num_classes=NUM_CLASSES)
+                    
                     server = FedAvg_Server(
+                        num_classes=NUM_CLASSES,
+                        backbone_model=global_backbone,
+                        source_domains=source_domains,
+                        num_rounds=NUM_ROUNDS,
+                        num_epochs=NUM_EPOCHS,
+                        batch_size=BATCH_SIZE,
+                        init_lr=INIT_LR,
+                        min_lr=MIN_LR,
+                        power=POWER,
+                        weight_decay=WEIGHT_DECAY
+                    )
+                elif algo == "fedsr":
+                    global_backbone = SegFormerB0_SR(num_classes=NUM_CLASSES)    
+
+                    server = FedSR_Server(
                         num_classes=NUM_CLASSES,
                         backbone_model=global_backbone,
                         source_domains=source_domains,
@@ -121,7 +140,9 @@ def main():
             print(f"- Pixel Accuracy: {acc_mean*100:.2f}% ± {acc_std*100:.2f}%")
             print(f"{'='*40}")
 
-    results_file_path = os.path.join(RESULTS_DIR, "lodo_final_metrics.json")
+    algorithm_str = "_".join(ALGORITHMS)
+    results_file_path = os.path.join(RESULTS_DIR, f"result_algo_{algorithm_str}.json")
+    
     with open(results_file_path, "w") as f:
         json.dump(experiment_results, f, indent=4)
     print(f"\n[Server] All LODO experiments complete. Results saved to {results_file_path}")
