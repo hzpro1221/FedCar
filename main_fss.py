@@ -16,10 +16,13 @@ from algorithms.fdg_css.fedavg.segformer_b0_avg import SegFormerB0_Avg
 from algorithms.fdg_css.fedsr.fedsr_server import FedSR_Server
 from algorithms.fdg_css.fedsr.segformer_b0_sr import SegFormerB0_SR
 
+from algorithms.fdg_css.fedavg_ga.fedavg_ga_server import FedAvg_GA_Server
+from algorithms.fdg_css.fedavg_ga.segformer_b0_avg_ga import SegFormerB0_Avg_GA
+
 # ==========================================
 # EXPERIMENT CONFIGURATIONS
 # ==========================================
-ALGORITHMS = ["fedsr"] # ["fedavg", "fedsr"] 
+ALGORITHMS = ["fedavg+ga"] # ["fedavg", "fedsr", "fedavg+ga"] 
 
 # Leave-One-Domain-Out Setup
 ALL_DOMAINS = ["cityscape", "gta5", "mapillary"] # ["cityscape", "gta5", "mapillary", "synthia", "bdd100"]
@@ -37,7 +40,7 @@ SEEDS = [2024, 2025, 2026]
 NUM_CLASSES = 19
 
 CHECKPOINT_DIR = "checkpoints"
-RESULTS_DIR = "results/fedavg"
+RESULTS_DIR = "results"
 # ==========================================
 
 def main():
@@ -95,6 +98,21 @@ def main():
                     global_backbone = SegFormerB0_SR(num_classes=NUM_CLASSES)    
 
                     server = FedSR_Server(
+                        num_classes=NUM_CLASSES,
+                        backbone_model=global_backbone,
+                        source_domains=source_domains,
+                        num_rounds=NUM_ROUNDS,
+                        num_epochs=NUM_EPOCHS,
+                        batch_size=BATCH_SIZE,
+                        init_lr=INIT_LR,
+                        min_lr=MIN_LR,
+                        power=POWER,
+                        weight_decay=WEIGHT_DECAY
+                    )
+                elif algo == "fedavg+ga":
+                    global_backbone = SegFormerB0_Avg_GA(num_classes=NUM_CLASSES)    
+
+                    server = FedAvg_GA_Server(
                         num_classes=NUM_CLASSES,
                         backbone_model=global_backbone,
                         source_domains=source_domains,
