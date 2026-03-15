@@ -27,10 +27,13 @@ from algorithms.fdg_css.fedavg_omg.segformer_b0_avg_omg import SegFormerB0_Avg_O
 from algorithms.fdg_css.feddg.feddg_server import FedDG_Server
 from algorithms.fdg_css.feddg.segformer_b0_dg import SegFormerB0_DG
 
+from algorithms.fdg_css.gperxan.gperxan_server import gPerXAN_Server
+from algorithms.fdg_css.gperxan.segformer_b0_gperxan import SegFormerB0_gPerXAN
+
 # ==========================================
 # EXPERIMENT CONFIGURATIONS
 # ==========================================
-ALGORITHMS = ["feddg"] # ["fedavg", "fedsr", "fedavg+ga", "fedavg+omg", "feddg"] 
+ALGORITHMS = ["gperxan"] # ["fedavg", "fedsr", "fedavg+ga", "fedavg+omg", "feddg", gperxan] 
 
 # Leave-One-Domain-Out Setup
 ALL_DOMAINS = ["cityscape", "gta5", "mapillary"] # ["cityscape", "gta5", "mapillary", "synthia", "bdd100"]
@@ -161,7 +164,22 @@ def main():
                         min_lr=MIN_LR,
                         power=POWER,
                         weight_decay=WEIGHT_DECAY
-                    )                                       
+                    )   
+                elif algo == "gperxan":
+                    global_backbone = SegFormerB0_gPerXAN(num_classes=NUM_CLASSES)    
+
+                    server = gPerXAN_Server(
+                        num_classes=NUM_CLASSES,
+                        backbone_model=global_backbone,
+                        source_domains=source_domains,
+                        num_rounds=NUM_ROUNDS,
+                        num_epochs=NUM_EPOCHS,
+                        batch_size=BATCH_SIZE,
+                        init_lr=INIT_LR,
+                        min_lr=MIN_LR,
+                        power=POWER,
+                        weight_decay=WEIGHT_DECAY
+                    )                                                           
                 else:
                     raise NotImplementedError(f"Algorithm '{algo}' is not implemented yet.")
 
