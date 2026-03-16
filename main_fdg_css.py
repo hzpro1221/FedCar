@@ -33,7 +33,7 @@ from algorithms.fdg_css.gperxan.segformer_b0_gperxan import SegFormerB0_gPerXAN
 # ==========================================
 # EXPERIMENT CONFIGURATIONS
 # ==========================================
-ALGORITHMS = ["fedavg+ga"] # ["fedavg", "fedsr", "fedavg+ga", "fedavg+omg", "feddg", gperxan] 
+ALGORITHMS = ["feddg"] # ["fedavg", "fedsr", "fedavg+ga", "fedavg+omg", "feddg", "gperxan"] 
 
 # Leave-One-Domain-Out Setup
 ALL_DOMAINS = ["cityscape", "gta5", "mapillary"] # ["cityscape", "gta5", "mapillary", "synthia", "bdd100"]

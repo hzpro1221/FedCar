@@ -135,7 +135,7 @@ class SensAug:
         power,
         weight_decay,
         max_steps_per_epch=10, 
-        max_sa_batches=10
+        max_sa_batches=1
     ):
         print("\n" + "="*50)
         print("[Trainer] Initializing SensAug Trainer...")
@@ -258,13 +258,12 @@ class SensAug:
         print("\n[SensAug] Running Sensitivity Analysis...")
         self.backbone_model.eval()
         
-        perturbations = ["blur", "noise", "brightness", "contrast"]
         levels = [1, 3, 5] 
         
         miou_record = {}        
 
         with torch.no_grad():
-            for p_type in perturbations:
+            for p_type in PERTURBATIONS_14:
                 for level in levels:
                     conf_matrix = torch.zeros(self.num_classes, self.num_classes).to(self.device)
                     

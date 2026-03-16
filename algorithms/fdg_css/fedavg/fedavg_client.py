@@ -118,7 +118,7 @@ class FedAvg_Client:
             total_iters=num_epoch, 
             power=self.power
         )
-
+        
     def train(
         self,
         global_parameters
