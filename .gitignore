@@ -3,6 +3,7 @@ dataset/cityscape
 dataset/gta5
 dataset/mapillary
 dataset/synthia
+dataset/augment_data
 venv
 checkpoints_css
 checkpoints_fdg_css

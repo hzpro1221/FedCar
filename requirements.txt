@@ -12,7 +12,6 @@ opencv-python
 transformers
 ray
 diffusers 
-transformers 
 accelerate 
 xformers
 scikit-learn 

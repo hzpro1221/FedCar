@@ -5,7 +5,7 @@ import numpy as np
 import time
 import gc
 
-project_root = "/root/KhaiDD/FedCar"
+project_root = os.getcwd()
 if project_root not in sys.path:
     sys.path.append(project_root)
 
@@ -18,10 +18,13 @@ from algorithms.fdgcss.feddrive.segformer_b0_drive import SegFormerB0_Drive
 from algorithms.fdgcss.fedema.fedema_server import FedEMA_Server
 from algorithms.fdgcss.fedema.segformer_b0_ema import SegFormerB0_EMA
 
+from algorithms.fdgcss.our.our_server import FedCovMatch_Server
+from algorithms.fdgcss.our.segformer_b0_our import SegFormerB0_CovMatch
+
 # ==========================================
 # EXPERIMENT CONFIGURATIONS
 # ==========================================
-ALGORITHMS = ["fedema"] # ["feddrive", "fedema"] 
+ALGORITHMS = ["our"] # ["feddrive", "fedema", "our"] 
 
 # Leave-One-Domain-Out Setup
 ALL_DOMAINS = ["cityscape", "gta5", "mapillary"] # ["cityscape", "gta5", "mapillary", "synthia", "bdd100"]
@@ -97,6 +100,21 @@ def main():
                     global_backbone = SegFormerB0_EMA(num_classes=NUM_CLASSES)    
 
                     server = FedEMA_Server(
+                        num_classes=NUM_CLASSES,
+                        backbone_model=global_backbone,
+                        source_domains=source_domains,
+                        num_rounds=NUM_ROUNDS,
+                        num_epochs=NUM_EPOCHS,
+                        batch_size=BATCH_SIZE,
+                        init_lr=INIT_LR,
+                        min_lr=MIN_LR,
+                        power=POWER,
+                        weight_decay=WEIGHT_DECAY
+                    )
+                elif algo == "our":
+                    global_backbone = SegFormerB0_CovMatch(num_classes=NUM_CLASSES)    
+
+                    server = FedCovMatch_Server(
                         num_classes=NUM_CLASSES,
                         backbone_model=global_backbone,
                         source_domains=source_domains,

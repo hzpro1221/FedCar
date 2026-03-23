@@ -5,7 +5,7 @@ import numpy as np
 import time
 import gc
 
-project_root = "/root/KhaiDD/FedCar"
+project_root = os.getcwd()
 if project_root not in sys.path:
     sys.path.append(project_root)
 
