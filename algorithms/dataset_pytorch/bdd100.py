@@ -9,17 +9,22 @@ class BDD100KDataset(Dataset):
         self, 
         images_dir, 
         labels_dir, 
-        image_size = (512, 512)
+        image_size = (512, 512),
+        num_sample = None  
     ):
         """
             images_dir: path to image.
             labels_dir: path to label.
+            num_sample: number of samples to load (loads all if None).
         """
         self.images_dir = images_dir
         self.labels_dir = labels_dir
         self.image_size = image_size
         
         self.image_filenames = [f for f in os.listdir(images_dir) if f.endswith('.jpg')]
+        self.image_filenames.sort() 
+        
+        self.image_filenames = self.image_filenames[:num_sample]
 
     def __len__(self):
         return len(self.image_filenames)

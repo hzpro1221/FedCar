@@ -1,6 +1,7 @@
 import sys
 import os
-project_root = "/root/KhaiDD/FedCar"
+
+project_root = os.getcwd()
 if project_root not in sys.path:
     sys.path.append(project_root)
 
@@ -27,24 +28,45 @@ class FedAvg_OMG_Server:
         num_epochs, 
         batch_size,
 
+        num_workers,       
+        num_sample,        
+        max_steps_per_epch, 
+
         init_lr,
         min_lr,
         power,
         weight_decay,
         
-        cagrad_c=0.4, 
-        global_lr=1.0
+        cagrad_c, 
+        global_lr,
+        omg_lr,
+        omg_momentum,
+        omg_num_iter
     ):
         """
-        1. num_classess: number of class to classify.
-        1.1 backbone_model: The instance of backbone model's class. In this work, it's fixed as SegmentFormer-B0.
-        2. source_domains: A list of source domains used to train (for simplicity, each client will correspond with a domain).
-        3. num_rounds: Number of communication rounds.
-        4. num_epochs: Number of epoch (used to train in server side).
-        5. batch_size: Number of batch size (also used in server side).
+        Initializes the Federated Learning Server with On-server Matching Gradient (FedOMG).
 
-        6. init_lr & min_lr & power: used to schedule learning rate.
-        7. weight_decay: Used in AdamW optimizer (in this work, by default the optimizer will be AdamW optimizer)
+        Args:
+            num_classes (int): Number of semantic classes.
+            backbone_model (nn.Module): The global backbone model (e.g., SegFormer-B0).
+            source_domains (list): List of source domains/datasets for training.
+            num_rounds (int): Total communication rounds.
+            num_epochs (int): Number of local epochs for clients.
+            batch_size (int): Batch size for training and evaluation.
+            num_workers (int): Number of subprocesses for data loading.
+            num_sample (int): Number of samples to load per dataset (loads all if None).
+            max_steps_per_epch (int): Maximum training steps per epoch for clients.
+            init_lr (float): Initial learning rate.
+            min_lr (float): Minimum learning rate.
+            power (float): Power factor for polynomial LR scheduler.
+            weight_decay (float): Weight decay coefficient.
+            cagrad_c (float): Parameter 'c' for CAGrad optimization.
+            global_lr (float): Global learning rate for updating server weights.
+            cagrad_c (float): Parameter 'c' for CAGrad optimization.
+            global_lr (float): Global learning rate for updating server weights.
+            omg_lr (float): Learning rate for the internal SGD optimizer in CAGrad.
+            omg_momentum (float): Momentum for the internal SGD optimizer.
+            omg_num_iter (int): Number of iterations to optimize the task weights 'w'.
         """
         print("\n" + "="*50)
         print("[Server] Initializing FedAvg + OMG Server...")
@@ -55,6 +77,10 @@ class FedAvg_OMG_Server:
         self.num_epochs = num_epochs
         self.batch_size = batch_size
         
+        self.num_workers = num_workers
+        self.num_sample = num_sample
+        self.max_steps_per_epch = max_steps_per_epch
+
         self.init_lr = init_lr
         self.min_lr = min_lr
         self.power = power
@@ -62,14 +88,15 @@ class FedAvg_OMG_Server:
 
         self.cagrad_c = cagrad_c
         self.global_lr = global_lr
+        self.omg_lr = omg_lr
+        self.omg_momentum = omg_momentum
+        self.omg_num_iter = omg_num_iter
 
-        # :vv trivial.. but this is for identifing device (in case you don't know)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"[Server] Global device set to: {self.device}")
         print(f"[Server] Source domains registered: {self.source_domains}")
         print(f"[Server] Communication Rounds: {self.num_rounds} | Local Epochs: {self.num_epochs}")
 
-        # For each domain -> we init a client, and assign a domain to him
         self.clients = []
         print("[Server] Initializing remote clients via Ray...")
         for i, domain in enumerate(self.source_domains):
@@ -81,8 +108,11 @@ class FedAvg_OMG_Server:
                         num_classes=self.num_classes
                     ),
 
+                    num_sample=self.num_sample,
                     num_epoch=self.num_epochs,
                     batch_size=self.batch_size,
+                    num_workers=self.num_workers,
+                    max_steps_per_epch=self.max_steps_per_epch,
 
                     init_lr=self.init_lr,
                     min_lr=self.min_lr,
@@ -92,23 +122,26 @@ class FedAvg_OMG_Server:
             )
         print(f"[Server] Successfully initialized {len(self.clients)} remote clients.")
         print("="*50 + "\n")
-    
+
     def set_seed(self, seed): 
-        # for python and numpy
         random.seed(seed)
         np.random.seed(seed)
 
-        # pytorch cpu & gpu (this is only for single GPU)
         torch.manual_seed(seed)
         torch.cuda.manual_seed(seed)
         print(f"[Server] Global seed set to {seed}.")
     
-    # =========================================================================
-    # CORE LOGIC of FED_OMG (CAGRAD)
-    # =========================================================================
     def OMG(self, grad_vec, num_tasks, cagrad_c):
         """
-        grad_vec shape: [num_tasks, total_flattened_params]
+        Computes the On-server Matching Gradient (CAGrad) across all domain gradients.
+        
+        Args:
+            grad_vec (torch.Tensor): Flattened gradients from all clients. Shape: [num_tasks, total_flattened_params].
+            num_tasks (int): Number of participating clients/domains.
+            cagrad_c (float): The CAGrad constraint parameter 'c'.
+            
+        Returns:
+            torch.Tensor: The optimized aggregated global gradient.
         """
         grads = grad_vec
         GG = grads.mm(grads.t()).cpu()
@@ -118,21 +151,20 @@ class FedAvg_OMG_Server:
         gg = Gg.mean(0, keepdims=True)
 
         w = torch.zeros(num_tasks, 1, requires_grad=True)
-        # Optimize w with SGD
-        w_opt = torch.optim.SGD([w], lr=25, momentum=0.5)
+        w_opt = torch.optim.SGD([w], lr=self.omg_lr, momentum=self.omg_momentum)
 
         c = (gg + 1e-4).sqrt() * cagrad_c
         w_best = None
         obj_best = np.inf
         
-        for i in range(21):
+        for i in range(self.omg_num_iter + 1):
             w_opt.zero_grad()
             ww = torch.softmax(w, 0)
             obj = ww.t().mm(Gg) + c * (ww.t().mm(GG).mm(ww) + 1e-4).sqrt()
             if obj.item() < obj_best:
                 obj_best = obj.item()
                 w_best = w.clone()
-            if i < 20:
+            if i < self.omg_num_iter:
                 obj.backward(retain_graph=True)
                 w_opt.step()
 
@@ -140,7 +172,6 @@ class FedAvg_OMG_Server:
         gw_norm = (ww.t().mm(GG).mm(ww) + 1e-4).sqrt()
 
         lmbda = c.view(-1) / (gw_norm + 1e-4)
-        # aggregate gradient
         g = ((1 / num_tasks + ww * lmbda).view(-1, 1).to(grads.device) * grads).sum(0) / (1 + cagrad_c ** 2)
         return g
 
@@ -149,7 +180,6 @@ class FedAvg_OMG_Server:
         num_tasks = len(local_weights_list)
         total_samples = sum(total_samples_list)
         
-        # Data-size weights
         weights = [n_k / total_samples for n_k in total_samples_list]
 
         global_state_dict = self.backbone_model.state_dict()
@@ -157,20 +187,20 @@ class FedAvg_OMG_Server:
         buffer_names = [name for name, buf in self.backbone_model.named_buffers()]
 
         all_domain_grads = []
-        for i in range(num_tasks):
-            local_w = local_weights_list[i]
-            domain_grad_diff = []
-            for name in param_names:
-                # Delta W = (W_local - W_global) * data_weight
-                diff = (local_w[name].to(self.device) - global_state_dict[name].to(self.device)) * weights[i]
-                domain_grad_diff.append(diff.view(-1))
+        with torch.no_grad():
+            for i in range(num_tasks):
+                local_w = local_weights_list[i]
+                domain_grad_diff = []
+                for name in param_names:
+                    diff = (local_w[name].to(self.device) - global_state_dict[name].to(self.device))
+                    domain_grad_diff.append(diff.view(-1))
+                
+                domain_grad_vector = torch.cat(domain_grad_diff)
+                all_domain_grads.append(domain_grad_vector)
             
-            domain_grad_vector = torch.cat(domain_grad_diff)
-            all_domain_grads.append(domain_grad_vector)
-            
-        all_domain_grads_tensor = torch.stack(all_domain_grads) # Shape: [num_tasks, total_params]
-
+        all_domain_grads_tensor = torch.stack(all_domain_grads) # [num_tasks, total_params]
         omg_grads = self.OMG(all_domain_grads_tensor, num_tasks, self.cagrad_c)
+        
         new_global_weights = copy.deepcopy(global_state_dict)
         
         offset = 0
@@ -178,10 +208,10 @@ class FedAvg_OMG_Server:
             param_shape = global_state_dict[name].shape
             param_size = global_state_dict[name].numel()
             
-            updated_param_grad = omg_grads[offset : offset + param_size].view(param_shape)
+            updated_param_delta = omg_grads[offset : offset + param_size].view(param_shape)
             
-            # W_new = W_old + global_lr * omg_grad
-            new_global_weights[name] = global_state_dict[name].to(self.device) + (updated_param_grad * self.global_lr)
+            # W_new = W_old + global_lr * optimized_delta
+            new_global_weights[name] = global_state_dict[name].to(self.device) + (updated_param_delta * self.global_lr)
             offset += param_size
 
         for name in buffer_names:
@@ -222,6 +252,9 @@ class FedAvg_OMG_Server:
         return self.backbone_model
 
     def evaluate(self, target_domain, checkpoint_path):
+        """
+        Evaluates the global model on a specified target domain.
+        """
         print("\n" + "="*50)
         print(f"[Server] Starting evaluation on Target Domain: {target_domain}")
 
@@ -236,37 +269,41 @@ class FedAvg_OMG_Server:
         dataset=None
         if target_domain == 'cityscape':
             dataset = CityscapesDataset(
-                images_dir="/root/KhaiDD/FedCar/dataset/cityscape/leftImg8bit/val",
-                labels_dir="/root/KhaiDD/FedCar/dataset/cityscape/gtFine/val"
+                images_dir="dataset/cityscape/leftImg8bit/val",
+                labels_dir="dataset/cityscape/gtFine/val",
+                num_sample=int(self.num_sample / 10)
             )
         elif target_domain == "bdd100":
             dataset = BDD100KDataset(
-                images_dir="/root/KhaiDD/FedCar/dataset/bdd100/10k/val",
-                labels_dir="/root/KhaiDD/FedCar/dataset/bdd100/labels/val"
+                images_dir="dataset/bdd100/10k/val",
+                labels_dir="dataset/bdd100/labels/val",
+                num_sample=int(self.num_sample / 10)
             )
         elif target_domain == "gta5":
             dataset = GTA5Dataset(
                 list_of_paths=[
-                    # "/root/KhaiDD/FedCar/dataset/gta5/gta5_part8",
-                    # "/root/KhaiDD/FedCar/dataset/gta5/gta5_part9",
-                    "/root/KhaiDD/FedCar/dataset/gta5/gta5_part10"
-                ]
+                    "dataset/gta5/gta5_part10"
+                ],
+                num_sample=int(self.num_sample / 10)
             )
         elif target_domain == "mapillary":
             dataset = MapillaryDataset(
-                root_dir="/root/KhaiDD/FedCar/dataset/mapillary/validation"
+                root_dir="dataset/mapillary/validation",
+                num_sample=int(self.num_sample / 10)
             ) 
         elif target_domain == "synthia":
             dataset = SynthiaDataset(
-                root_dir="/root/KhaiDD/FedCar/dataset/synthia/RAND_CITYSCAPES",
-                start_index=6580
+                root_dir="dataset/synthia/RAND_CITYSCAPES",
+                start_index=6580, 
+                end_index=None,
+                num_sample=int(self.num_sample / 10)
             )
         
         self.test_dataloader = DataLoader(
             dataset,
             batch_size=self.batch_size,
             shuffle=True,
-            num_workers=2,
+            num_workers=self.num_workers, 
             pin_memory=True
         )
         print(f"[Server] Dataset loaded. Total batches to evaluate: {len(self.test_dataloader)}")
@@ -277,13 +314,11 @@ class FedAvg_OMG_Server:
                 images = images.to(self.device)
                 masks = masks.to(self.device)
 
-                outputs = self.backbone_model(images) # Output: [B, 19, 512, 512]
+                outputs = self.backbone_model(images)
 
-                preds = torch.argmax(outputs, dim=1) # Preds: [B, 512, 512]
+                preds = torch.argmax(outputs, dim=1)
                 
-                # Only caculate on pixel that is not 255 
                 mask_valid = (masks != 255)
-                
                 target = masks[mask_valid]
                 predict = preds[mask_valid]
                 

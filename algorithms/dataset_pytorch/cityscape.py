@@ -9,11 +9,13 @@ class CityscapesDataset(Dataset):
         self, 
         images_dir, 
         labels_dir, 
-        image_size = (512, 512)
+        image_size = (512, 512),
+        num_sample = None  # Thêm tham số num_sample
     ):
         """
             images_dir: path to image.
             labels_dir: path to label.
+            num_sample: number of samples to load (loads all if None).
         """
         self.images_dir = images_dir
         self.labels_dir = labels_dir
@@ -23,6 +25,7 @@ class CityscapesDataset(Dataset):
         self.mask_paths = []
 
         valid_cities = [c for c in os.listdir(images_dir) if os.path.isdir(os.path.join(images_dir, c))]
+        valid_cities.sort()
 
         for city in valid_cities:
             city_img_dir = os.path.join(images_dir, city)
@@ -38,11 +41,11 @@ class CityscapesDataset(Dataset):
                     self.image_paths.append(img_path)
                     self.mask_paths.append(mask_path)
 
-        # ==========================================
-        # MAPING -> 19 CLASSES
-        # ==========================================
+        self.image_paths = self.image_paths[:num_sample]
+        self.mask_paths = self.mask_paths[:num_sample]
+
         self.mapping_256 = np.zeros(256, dtype=np.int64)
-        self.mapping_256[:] = 255 #  By default, all irrelevant data are 255 (void/ignore)
+        self.mapping_256[:] = 255 # void/ignore
         
         self.mapping_256[7] = 0    # road
         self.mapping_256[8] = 1    # sidewalk

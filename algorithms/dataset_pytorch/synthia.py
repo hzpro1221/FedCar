@@ -11,12 +11,12 @@ class SynthiaDataset(Dataset):
         root_dir, 
         image_size=(512, 512),
         start_index=None,
-        end_index=None
+        end_index=None,
+        num_sample=None 
     ):
         """
             root_dir: path to data folder
-            start_index: start index of data
-            end_index: end index of data
+            num_sample: number of samples to load (loads all if None).
         """
         self.root_dir = root_dir
         self.image_size = image_size
@@ -25,7 +25,7 @@ class SynthiaDataset(Dataset):
         self.labels_dir = os.path.join(root_dir, 'GT', 'LABELS')
         
         if not os.path.exists(self.images_dir) or not os.path.exists(self.labels_dir):
-            raise FileNotFoundError(f"Error: Didn't found RGB/ or GT/LABELS/ in {root_dir}")
+            raise FileNotFoundError(f"Error: Didn't find RGB/ or GT/LABELS/ in {root_dir}")
 
         self.image_paths = []
         self.mask_paths = []
@@ -33,18 +33,18 @@ class SynthiaDataset(Dataset):
         all_filenames = sorted(os.listdir(self.images_dir))
         selected_filenames = all_filenames[start_index:end_index]
 
-        for file_name in selected_filenames:
+        for file_name in all_filenames:
             if file_name.endswith('.png'):
                 img_path = os.path.join(self.images_dir, file_name)
                 mask_path = os.path.join(self.labels_dir, file_name) 
                 
                 self.image_paths.append(img_path)
                 self.mask_paths.append(mask_path)
+                
+        self.image_paths = self.image_paths[:num_sample]
+        self.mask_paths = self.mask_paths[:num_sample]
 
-        # ==========================================
-        # MAPPING: SYNTHIA -> 19 CLASSES
-        # ==========================================
-        self.mapping_256 = np.full(256, 255, dtype=np.int64) 
+        self.mapping_256 = np.full(256, 255, dtype=np.int64) # By default, all irrelevant data are 255 (void/ignore)
         
         self.mapping_256[3]  = 0  # road
         self.mapping_256[4]  = 1  # sidewalk
@@ -71,6 +71,10 @@ class SynthiaDataset(Dataset):
         mask_path = self.mask_paths[idx]
 
         mask = cv2.imread(mask_path, cv2.IMREAD_UNCHANGED)
+        
+        if mask is None:
+            raise ValueError(f"Cannot read mask image: {mask_path}")
+
         if mask.ndim == 3:
             mask = mask[:, :, 2]        
 

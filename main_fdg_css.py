@@ -33,19 +33,24 @@ from algorithms.fdg_css.gperxan.segformer_b0_gperxan import SegFormerB0_gPerXAN
 # ==========================================
 # EXPERIMENT CONFIGURATIONS
 # ==========================================
-ALGORITHMS = ["feddg"] # ["fedavg", "fedsr", "fedavg+ga", "fedavg+omg", "feddg", "gperxan"] 
+ALGORITHMS = ["fedavg"] # ["fedavg", "fedsr", "fedavg+ga", "fedavg+omg", "feddg", "gperxan"] 
 
 # Leave-One-Domain-Out Setup
-ALL_DOMAINS = ["cityscape", "gta5", "mapillary"] # ["cityscape", "gta5", "mapillary", "synthia", "bdd100"]
+ALL_DOMAINS = ["cityscape", "gta5", "mapillary", "synthia", "bdd100"] # ["cityscape", "gta5", "mapillary", "synthia", "bdd100"]
 
-NUM_ROUNDS = 10 # 40
-NUM_EPOCHS = 2 # 5
-BATCH_SIZE = 8 # 64
+NUM_ROUNDS = 40 
+NUM_EPOCHS = 5
+BATCH_SIZE = 4
+
+NUM_WORKERS = 4
+NUM_SAMPLE = 2000
+MAX_STEP_PER_EPCH = 200
+
 INIT_LR = 1e-3 
 MIN_LR = 2e-4
 POWER = 0.9
 WEIGHT_DECAY = 0.01
-SEEDS = [2024, 2025, 2026]  
+SEEDS = [2026]  
 
 # Hard fix
 NUM_CLASSES = 19
@@ -97,9 +102,15 @@ def main():
                         num_classes=NUM_CLASSES,
                         backbone_model=global_backbone,
                         source_domains=source_domains,
+                        
                         num_rounds=NUM_ROUNDS,
                         num_epochs=NUM_EPOCHS,
                         batch_size=BATCH_SIZE,
+                        
+                        num_workers=NUM_WORKERS,
+                        num_sample=NUM_SAMPLE,
+                        max_steps_per_epch=MAX_STEP_PER_EPCH,
+                        
                         init_lr=INIT_LR,
                         min_lr=MIN_LR,
                         power=POWER,

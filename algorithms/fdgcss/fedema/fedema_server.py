@@ -1,6 +1,7 @@
 import sys
 import os
-project_root = "/root/KhaiDD/FedCar"
+
+project_root = os.getcwd()
 if project_root not in sys.path:
     sys.path.append(project_root)
 
@@ -26,24 +27,37 @@ class FedEMA_Server:
         num_rounds, 
         num_epochs, 
         batch_size,
+        
+        num_workers,
+        num_sample,
+        max_steps_per_epch,
 
         init_lr,
         min_lr,
         power,
         weight_decay,
-        beta=0.9,           
-        lambda_ent=0.01
+        beta,           
+        lambda_ent
     ):
         """
-        1. num_classess: number of class to classify.
-        1.1 backbone_model: The instance of backbone model's class. In this work, it's fixed as SegmentFormer-B0.
-        2. source_domains: A list of source domains used to train (for simplicity, each client will correspond with a domain).
-        3. num_rounds: Number of communication rounds.
-        4. num_epochs: Number of epoch (used to train in server side).
-        5. batch_size: Number of batch size (also used in server side).
+        Initializes the Federated Learning Server for the FedEMA algorithm.
 
-        6. init_lr & min_lr & power: used to schedule learning rate.
-        7. weight_decay: Used in AdamW optimizer (in this work, by default the optimizer will be AdamW optimizer)
+        Args:
+            num_classes (int): Number of classes for the segmentation task.
+            backbone_model (nn.Module): The global backbone model (e.g., SegFormer-B0).
+            source_domains (list): List of source domains/datasets used for training.
+            num_rounds (int): Total number of communication rounds.
+            num_epochs (int): Number of local epochs for each client per round.
+            batch_size (int): Batch size for local client training and server evaluation.
+            num_workers (int): Number of subprocesses for data loading.
+            num_sample (int): Number of samples to load per dataset (loads all if None).
+            max_steps_per_epch (int): Maximum number of training steps per epoch for clients.
+            init_lr (float): Initial learning rate for the optimizer.
+            min_lr (float): Minimum learning rate for the scheduler.
+            power (float): Power factor for the polynomial learning rate scheduler.
+            weight_decay (float): Weight decay coefficient for the AdamW optimizer.
+            beta (float): Momentum parameter for the Exponential Moving Average (EMA).
+            lambda_ent (float): Weight of the Negative Entropy penalty term.
         """
         print("\n" + "="*50)
         print("[Server] Initializing FedEMA Server...")
@@ -54,6 +68,10 @@ class FedEMA_Server:
         self.num_epochs = num_epochs
         self.batch_size = batch_size
         
+        self.num_workers = num_workers
+        self.num_sample = num_sample
+        self.max_steps_per_epch = max_steps_per_epch
+
         self.init_lr = init_lr
         self.min_lr = min_lr
         self.power = power
@@ -77,36 +95,38 @@ class FedEMA_Server:
                     local_model=SegFormerB0_EMA(
                         num_classes=self.num_classes
                     ),
-
+                    num_sample=self.num_sample,
                     num_epoch=self.num_epochs,
                     batch_size=self.batch_size,
-
+                    num_workers=self.num_workers,
+                    
                     init_lr=self.init_lr,
                     min_lr=self.min_lr,
                     power=self.power,
-                    weight_decay=self.weight_decay
+                    weight_decay=self.weight_decay,
+                    
+                    lambda_ent=self.lambda_ent,
+                    max_steps_per_epch=self.max_steps_per_epch
                 )
             )
         print(f"[Server] Successfully initialized {len(self.clients)} remote clients.")
         print("="*50 + "\n")
     
     def set_seed(self, seed): 
-        # for python and numpy
         random.seed(seed)
         np.random.seed(seed)
-
-        # pytorch cpu & gpu (this is only for single GPU)
         torch.manual_seed(seed)
         torch.cuda.manual_seed(seed)
         print(f"[Server] Global seed set to {seed}.")
     
     def aggregate(self, local_weights_list, total_samples_list):
         """
+        Aggregates local model weights using FedAvg strategy:
         W_global = sum( (n_k / n_total) * W_k )
         """
-        print("[Server] Starting FedEMA aggregation...")
+        print("[Server] Starting FedAvg aggregation step...")
         total_samples = sum(total_samples_list)
-        print(f"[Server] Total samples across all clients: {total_samples}")
+        print(f"[Server] Total valid samples trained across all clients: {total_samples}")
         
         avg_weights = copy.deepcopy(local_weights_list[0])
         for key in avg_weights.keys():
@@ -125,7 +145,8 @@ class FedEMA_Server:
 
     def update_ema(self, global_weights, aggregated_weights):
         """
-        EMA Formulate: \omega_EMA^r = \beta \omega_EMA^{r-1} + (1 - \beta) \omega
+        Updates the global model weights using Exponential Moving Average:
+        \omega_EMA^r = \beta * \omega_EMA^{r-1} + (1 - \beta) * \omega_aggregated
         """
         for key in global_weights.keys():
             if torch.is_floating_point(global_weights[key]):
@@ -145,24 +166,29 @@ class FedEMA_Server:
             print(f"\n--- [Server] Starting Round {round_idx + 1}/{self.num_rounds} ---")
             
             # Distribute \omega_EMA^{r-1} to clients
+            print("[Server] Broadcasting global EMA weights to all clients...")
             job_ids = [
                 client.train.remote(global_parameters=global_ema_weights) 
-                for i, client in enumerate(self.clients)
+                for client in self.clients
             ]
 
+            print(f"[Server] Waiting for {len(self.clients)} clients to finish local training...")
             results = ray.get(job_ids)
+            print("[Server] Received local updates from all clients.")
             
             local_weights_list = [r[0] for r in results]
             total_samples_list = [r[1] for r in results]
 
-            # Caculate \omega (FedAvg)
+            # Calculate \omega (Aggregated Weights via FedAvg)
             aggregated_weights = self.aggregate(local_weights_list, total_samples_list)
 
-            # Update \omega_EMA^r 
+            # Update \omega_EMA^r (Apply EMA on the aggregated weights)
+            print("[Server] Updating global model using EMA...")
             global_ema_weights = self.update_ema(global_ema_weights, aggregated_weights)
 
+            # Load updated weights into server's backbone
             self.backbone_model.load_state_dict(global_ema_weights)
-            round_pbar.set_description(f"Num Finished Round {round_idx + 1}")
+            round_pbar.set_description(f"Finished Round {round_idx + 1}")
 
         print(f"\n[Server] Training complete. Saving global EMA model to {checkpoint_path}")
         torch.save(self.backbone_model.state_dict(), checkpoint_path)
@@ -178,42 +204,50 @@ class FedEMA_Server:
         print(f"[Server] Loaded checkpoint from {checkpoint_path}")
 
         conf_matrix = torch.zeros(self.num_classes, self.num_classes).to(self.device)
-
         print(f"[Server] Loading dataset for {target_domain}...")
-        dataset=None
+        
+        eval_num_sample = int(self.num_sample / 10) if self.num_sample is not None else None
+        dataset = None
+
         if target_domain == 'cityscape':
             dataset = CityscapesDataset(
-                images_dir="/root/KhaiDD/FedCar/dataset/cityscape/leftImg8bit/val",
-                labels_dir="/root/KhaiDD/FedCar/dataset/cityscape/gtFine/val"
+                images_dir="dataset/cityscape/leftImg8bit/val",
+                labels_dir="dataset/cityscape/gtFine/val",
+                num_sample=eval_num_sample
             )
         elif target_domain == "bdd100":
             dataset = BDD100KDataset(
-                images_dir="/root/KhaiDD/FedCar/dataset/bdd100/10k/val",
-                labels_dir="/root/KhaiDD/FedCar/dataset/bdd100/labels/val"
+                images_dir="dataset/bdd100/10k/val",
+                labels_dir="dataset/bdd100/labels/val",
+                num_sample=eval_num_sample
             )
         elif target_domain == "gta5":
             dataset = GTA5Dataset(
                 list_of_paths=[
-                    # "/root/KhaiDD/FedCar/dataset/gta5/gta5_part8",
-                    # "/root/KhaiDD/FedCar/dataset/gta5/gta5_part9",
-                    "/root/KhaiDD/FedCar/dataset/gta5/gta5_part10"
-                ]
+                    "dataset/gta5/gta5_part8",
+                    "dataset/gta5/gta5_part9",
+                    "dataset/gta5/gta5_part10"
+                ],
+                num_sample=eval_num_sample
             )
         elif target_domain == "mapillary":
             dataset = MapillaryDataset(
-                root_dir="/root/KhaiDD/FedCar/dataset/mapillary/validation"
+                root_dir="dataset/mapillary/validation",
+                num_sample=eval_num_sample
             ) 
         elif target_domain == "synthia":
             dataset = SynthiaDataset(
-                root_dir="/root/KhaiDD/FedCar/dataset/synthia/RAND_CITYSCAPES",
-                start_index=6580
+                root_dir="dataset/synthia/RAND_CITYSCAPES",
+                start_index=6580,
+                end_index=None,
+                num_sample=eval_num_sample
             )
         
         self.test_dataloader = DataLoader(
             dataset,
             batch_size=self.batch_size,
             shuffle=True,
-            num_workers=2,
+            num_workers=self.num_workers, 
             pin_memory=True
         )
         print(f"[Server] Dataset loaded. Total batches to evaluate: {len(self.test_dataloader)}")
@@ -225,10 +259,9 @@ class FedEMA_Server:
                 masks = masks.to(self.device)
 
                 outputs = self.backbone_model(images) # Output: [B, 19, 512, 512]
-
-                preds = torch.argmax(outputs, dim=1) # Preds: [B, 512, 512]
+                preds = torch.argmax(outputs, dim=1)  # Preds: [B, 512, 512]
                 
-                # Only caculate on pixel that is not 255 
+                # Only calculate on pixels that are not 255 (ignore_index)
                 mask_valid = (masks != 255)
                 
                 target = masks[mask_valid]
@@ -254,4 +287,5 @@ class FedEMA_Server:
         print("="*40)
         for i, iou in enumerate(iou_per_class):
             print(f"Class {i:2d}: {iou.item()*100:.2f}%")
+            
         return miou, pixel_acc, iou_per_class

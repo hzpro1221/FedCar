@@ -8,10 +8,12 @@ class GTA5Dataset(Dataset):
     def __init__(
         self, 
         list_of_paths, 
-        image_size = (512, 512)
+        image_size = (512, 512),
+        num_sample = None  # Thêm tham số num_sample
     ):
         """
             list_of_paths: list of paths to GTA5 parts (e.g., ['/data/gta5/part1', '/data/gta5/part2'])
+            num_sample: number of samples to load (loads all if None).
         """
         self.list_of_paths = list_of_paths
         
@@ -19,12 +21,15 @@ class GTA5Dataset(Dataset):
         self.mask_paths = []
         self.image_size = image_size
 
-        for part_path in list_of_paths:
+        if isinstance(self.list_of_paths, list):
+            self.list_of_paths.sort()
+
+        for part_path in self.list_of_paths:
             img_dir = os.path.join(part_path, 'images')
             lbl_dir = os.path.join(part_path, 'labels')
             
             if not os.path.exists(img_dir) or not os.path.exists(lbl_dir):
-                raise FileNotFoundError("Not found images or labels folder!")
+                raise FileNotFoundError(f"Not found images or labels folder in: {part_path}")
 
             for file_name in sorted(os.listdir(img_dir)):
                 if file_name.endswith('.png') or file_name.endswith('.jpg'):
@@ -35,9 +40,9 @@ class GTA5Dataset(Dataset):
                     self.image_paths.append(img_path)
                     self.mask_paths.append(mask_path)
 
-        # ==========================================
-        # MAPPING RGB -> 19 CLASS
-        # ==========================================
+        self.image_paths = self.image_paths[:num_sample]
+        self.mask_paths = self.mask_paths[:num_sample]
+
         self.color2id = {
             (128, 64, 128): 0,   # road
             (244, 35, 232): 1,   # sidewalk

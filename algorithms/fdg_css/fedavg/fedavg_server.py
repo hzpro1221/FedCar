@@ -1,6 +1,7 @@
 import sys
 import os
-project_root = "/root/KhaiDD/FedCar"
+
+project_root = os.getcwd()
 if project_root not in sys.path:
     sys.path.append(project_root)
 
@@ -27,21 +28,32 @@ class FedAvg_Server:
         num_epochs, 
         batch_size,
 
+        num_workers,
+        num_sample,
+        max_steps_per_epch,
+
         init_lr,
         min_lr,
         power,
         weight_decay
     ):
         """
-        1. num_classess: number of class to classify.
-        1.1 backbone_model: The instance of backbone model's class. In this work, it's fixed as SegmentFormer-B0.
-        2. source_domains: A list of source domains used to train (for simplicity, each client will correspond with a domain).
-        3. num_rounds: Number of communication rounds.
-        4. num_epochs: Number of epoch (used to train in server side).
-        5. batch_size: Number of batch size (also used in server side).
+        Initializes the Federated Learning Server for the FedAvg algorithm.
 
-        6. init_lr & min_lr & power: used to schedule learning rate.
-        7. weight_decay: Used in AdamW optimizer (in this work, by default the optimizer will be AdamW optimizer)
+        Args:
+            num_classes (int): Number of classes for the segmentation task.
+            backbone_model (nn.Module): The global backbone model (e.g., SegFormer-B0).
+            source_domains (list): List of source domains/datasets used for training.
+            num_rounds (int): Total number of communication rounds.
+            num_epochs (int): Number of local epochs for each client per round.
+            batch_size (int): Batch size for local client training and server evaluation.
+            num_workers (int): Number of subprocesses for data loading.
+            num_sample (int): Number of samples to load per dataset (loads all if None).
+            max_steps_per_epch (int): Maximum number of training steps per epoch for clients.
+            init_lr (float): Initial learning rate for the optimizer.
+            min_lr (float): Minimum learning rate for the scheduler.
+            power (float): Power factor for the polynomial learning rate scheduler.
+            weight_decay (float): Weight decay coefficient for the AdamW optimizer.
         """
         print("\n" + "="*50)
         print("[Server] Initializing FedAvg Server...")
@@ -52,18 +64,21 @@ class FedAvg_Server:
         self.num_epochs = num_epochs
         self.batch_size = batch_size
         
+        self.num_workers = num_workers
+        self.num_sample = num_sample
+        self.max_steps_per_epch = max_steps_per_epch
+
         self.init_lr = init_lr
         self.min_lr = min_lr
         self.power = power
         self.weight_decay = weight_decay
 
-        # :vv trivial.. but this is for identifing device (in case you don't know)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"[Server] Global device set to: {self.device}")
         print(f"[Server] Source domains registered: {self.source_domains}")
         print(f"[Server] Communication Rounds: {self.num_rounds} | Local Epochs: {self.num_epochs}")
 
-        # For each domain -> we init a client, and assign a domain to him
+        # Initialize a client for each domain
         self.clients = []
         print("[Server] Initializing remote clients via Ray...")
         for i, domain in enumerate(self.source_domains):
@@ -75,8 +90,11 @@ class FedAvg_Server:
                         num_classes=self.num_classes
                     ),
 
+                    num_sample=self.num_sample,
                     num_epoch=self.num_epochs,
                     batch_size=self.batch_size,
+                    num_workers=self.num_workers,
+                    max_steps_per_epch=self.max_steps_per_epch,
 
                     init_lr=self.init_lr,
                     min_lr=self.min_lr,
@@ -171,37 +189,43 @@ class FedAvg_Server:
         dataset=None
         if target_domain == 'cityscape':
             dataset = CityscapesDataset(
-                images_dir="/root/KhaiDD/FedCar/dataset/cityscape/leftImg8bit/val",
-                labels_dir="/root/KhaiDD/FedCar/dataset/cityscape/gtFine/val"
+                images_dir="dataset/cityscape/leftImg8bit/val",
+                labels_dir="dataset/cityscape/gtFine/val",
+                num_sample=int(self.num_sample / 10)
             )
         elif target_domain == "bdd100":
             dataset = BDD100KDataset(
-                images_dir="/root/KhaiDD/FedCar/dataset/bdd100/10k/val",
-                labels_dir="/root/KhaiDD/FedCar/dataset/bdd100/labels/val"
+                images_dir="dataset/bdd100/10k/val",
+                labels_dir="dataset/bdd100/labels/val",
+                num_sample=int(self.num_sample / 10)
             )
         elif target_domain == "gta5":
             dataset = GTA5Dataset(
                 list_of_paths=[
-                    "/root/KhaiDD/FedCar/dataset/gta5/gta5_part8",
-                    "/root/KhaiDD/FedCar/dataset/gta5/gta5_part9",
-                    "/root/KhaiDD/FedCar/dataset/gta5/gta5_part10"
-                ]
+                    "dataset/gta5/gta5_part8",
+                    "dataset/gta5/gta5_part9",
+                    "dataset/gta5/gta5_part10"
+                ],
+                num_sample=int(self.num_sample / 10)
             )
         elif target_domain == "mapillary":
             dataset = MapillaryDataset(
-                root_dir="/root/KhaiDD/FedCar/dataset/mapillary/validation"
+                root_dir="dataset/mapillary/validation",
+                num_sample=int(self.num_sample / 10)
             ) 
         elif target_domain == "synthia":
             dataset = SynthiaDataset(
-                root_dir="/root/KhaiDD/FedCar/dataset/synthia/RAND_CITYSCAPES",
-                start_index=6580
+                root_dir="dataset/synthia/RAND_CITYSCAPES",
+                start_index=6580,
+                end_index=None,
+                num_sample=int(self.num_sample / 10)
             )
         
         self.test_dataloader = DataLoader(
             dataset,
             batch_size=self.batch_size,
             shuffle=True,
-            num_workers=2,
+            num_workers=self.num_workers,
             pin_memory=True
         )
         print(f"[Server] Dataset loaded. Total batches to evaluate: {len(self.test_dataloader)}")

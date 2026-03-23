@@ -1,6 +1,7 @@
 import sys
 import os
-project_root = "/root/KhaiDD/FedCar"
+
+project_root = os.getcwd()
 if project_root not in sys.path:
     sys.path.append(project_root)
 
@@ -16,7 +17,7 @@ import time
 
 from algorithms.dataset_pytorch import BDD100KDataset, CityscapesDataset, GTA5Dataset, MapillaryDataset, SynthiaDataset
 
-# The num_gpus for each worker is fixed as 0.2, because there are totally only 5 domains, thus 5 clients maximum :vv...
+# The num_gpus for each worker is fixed at 0.2 because there are only 5 domains total, allowing up to 5 concurrent clients.
 @ray.remote(num_gpus=0.2)
 class FedAvg_GA_Client:
     def __init__(
@@ -25,26 +26,33 @@ class FedAvg_GA_Client:
         client_id,
         local_model,
 
+        num_sample,   
         num_epoch,
         batch_size,
+        num_workers,  
 
         init_lr,
         min_lr,
         power,
         weight_decay,
-        max_steps_per_epch=10
+        max_steps_per_epch
     ):
         """
-        data: domain object used in this client.
-        client_id.
-        local_model: model saved in client.
+        Initializes the Federated Learning Client for the FedAvg-GA (Generalization Adjustment) algorithm.
 
-        num_epoch.
-        batch_size.
-        
-        init_lr & min_lr & power: used to schedule learning rate.
-        weight_decay: Used in AdamW optimizer (in this work, by default the optimizer will be AdamW optimizer)
-        max_steps_per_epch.
+        Args:
+            data (str): The name of the domain/dataset used by this client.
+            client_id (int/str): Unique identifier for the client.
+            local_model (nn.Module): The PyTorch model assigned to this client.
+            num_sample (int): Number of training samples to load.
+            num_epoch (int): Number of local training epochs.
+            batch_size (int): Batch size for the DataLoader.
+            num_workers (int): Number of subprocesses for data loading.
+            init_lr (float): Initial learning rate for the optimizer.
+            min_lr (float): Minimum learning rate.
+            power (float): Power factor for PolynomialLR scheduler.
+            weight_decay (float): Weight decay coefficient for the AdamW optimizer.
+            max_steps_per_epch (int): Maximum number of batches to process per epoch.
         """
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -53,8 +61,10 @@ class FedAvg_GA_Client:
         
         self.local_model = local_model.to(self.device)
 
+        self.num_sample = num_sample
         self.num_epoch = num_epoch
         self.batch_size = batch_size
+        self.num_workers = num_workers
 
         self.init_lr = init_lr
         self.min_lr = min_lr
@@ -62,67 +72,69 @@ class FedAvg_GA_Client:
         self.weight_decay = weight_decay
         self.max_steps_per_epch = max_steps_per_epch
 
-        # Init dataloader & optimizer & scheduler
+        # Initialize dataloader & optimizer & scheduler
         if self.data == 'cityscape':
             self.dataset = CityscapesDataset(
-                images_dir="/root/KhaiDD/FedCar/dataset/cityscape/leftImg8bit/train",
-                labels_dir="/root/KhaiDD/FedCar/dataset/cityscape/gtFine/train"
+                images_dir="dataset/cityscape/leftImg8bit/train",
+                labels_dir="dataset/cityscape/gtFine/train",
+                num_sample=self.num_sample
             )
         elif self.data == "bdd100":
             self.dataset = BDD100KDataset(
-                images_dir="/root/KhaiDD/FedCar/dataset/bdd100/10k/train",
-                labels_dir="/root/KhaiDD/FedCar/dataset/bdd100/labels/train"
+                images_dir="dataset/bdd100/10k/train",
+                labels_dir="dataset/bdd100/labels/train",
+                num_sample=self.num_sample
             )
         elif self.data == "gta5":
             self.dataset = GTA5Dataset(
                 list_of_paths=[
-                    "/root/KhaiDD/FedCar/dataset/gta5/gta5_part1",
-                    "/root/KhaiDD/FedCar/dataset/gta5/gta5_part2",
-                    "/root/KhaiDD/FedCar/dataset/gta5/gta5_part3",
-                    "/root/KhaiDD/FedCar/dataset/gta5/gta5_part4",
-                    "/root/KhaiDD/FedCar/dataset/gta5/gta5_part5",
-                    "/root/KhaiDD/FedCar/dataset/gta5/gta5_part6",
-                    "/root/KhaiDD/FedCar/dataset/gta5/gta5_part7",
-                ]
+                    "dataset/gta5/gta5_part1",
+                    "dataset/gta5/gta5_part2",
+                    "dataset/gta5/gta5_part3",
+                    "dataset/gta5/gta5_part4",
+                    "dataset/gta5/gta5_part5",
+                    "dataset/gta5/gta5_part6",
+                    "dataset/gta5/gta5_part7",
+                ],
+                num_sample=self.num_sample
             )
         elif self.data == "mapillary":
             self.dataset = MapillaryDataset(
-                root_dir="/root/KhaiDD/FedCar/dataset/mapillary/training"
+                root_dir="dataset/mapillary/training",
+                num_sample=self.num_sample
             ) 
         elif self.data == "synthia":
             self.dataset = SynthiaDataset(
-                root_dir="/root/KhaiDD/FedCar/dataset/synthia/RAND_CITYSCAPES",
+                root_dir="dataset/synthia/RAND_CITYSCAPES",
                 start_index=0,
-                end_index=6580
+                end_index=6580,
+                num_sample=self.num_sample
             )
+        else:
+            raise ValueError(f"Unknown dataset domain: {self.data}")
         
         self.train_dataloader = DataLoader(
             self.dataset,
             batch_size=self.batch_size,
             shuffle=True,
-            num_workers=2,
+            num_workers=self.num_workers,
             pin_memory=True
         )
-        self.num_samples = len(self.dataset)
-
-        self.optimizer = optim.AdamW(
-            self.local_model.parameters(), 
-            lr=init_lr, 
-            weight_decay=weight_decay
-        )
+        self.total_samples = len(self.dataset)
         
         self.criterion = nn.CrossEntropyLoss(ignore_index=255)
 
-        self.scheduler = optim.lr_scheduler.PolynomialLR(
-            self.optimizer, 
-            total_iters=num_epoch, 
-            power=self.power
-        )
-
     def _compute_loss(self):
-        "Caculate loss on local data to caculate generalization gap"
+        """
+        Calculates the average loss on the local dataset using the current model state.
+        Used to measure the Generalization Gap before and after local training.
+
+        Returns:
+            float: Average loss over the sampled batches.
+        """
         self.local_model.eval()
         total_loss = 0.0
+        
         with torch.no_grad():
             for step, (images, masks) in enumerate(self.train_dataloader):
                 if step >= self.max_steps_per_epch:
@@ -136,37 +148,59 @@ class FedAvg_GA_Client:
 
     def train(self, global_parameters):
         """
-        global_parameters: New parameters after aggregated from server.
+        Executes local training and computes the generalization gap for Server aggregation.
+
+        Args:
+            global_parameters (dict): Aggregated model weights from the server.
+
+        Returns:
+            tuple: 
+                - local_weights (dict): Updated local model weights (on CPU).
+                - generalization_gap (float): Difference between global loss and local loss.
         """
         self.local_model.load_state_dict(global_parameters)
         self.local_model.to(self.device)
         
-        # caculate global loss gap
+        self.optimizer = optim.AdamW(
+            self.local_model.parameters(), 
+            lr=self.init_lr, 
+            weight_decay=self.weight_decay
+        )
+
+        self.scheduler = optim.lr_scheduler.PolynomialLR(
+            self.optimizer, 
+            total_iters=self.num_epoch * self.max_steps_per_epch, 
+            power=self.power
+        )
+
+        # Calculate loss of the GLOBAL model on local data
         global_loss = self._compute_loss()
         
+        # Perform Local Training
         self.local_model.train()
         for epoch in range(self.num_epoch):
             epoch_loss = 0
             for step, (images, masks) in enumerate(self.train_dataloader):
-                if (step > self.max_steps_per_epch):
+                if step >= self.max_steps_per_epch:
                     break
                 images, masks = images.to(self.device), masks.to(self.device)
+                
                 self.optimizer.zero_grad()
                 outputs = self.local_model(images)
                 loss = self.criterion(outputs, masks)
                 loss.backward()
                 self.optimizer.step()
+                
                 epoch_loss += loss.item()
+                self.scheduler.step()
 
-            self.scheduler.step()
-
-        # caculate local loss gap (global model after training)
+        # Calculate loss of the LOCAL model on local data
         local_loss = self._compute_loss()
 
-        # --- Generalization Gap ---
-        # G_i = Loss(Global) - Loss(Local)
+        # Compute Generalization Gap (G_i = Global Loss - Local Loss)
         generalization_gap = global_loss - local_loss
 
+        # Move weights to CPU to save GPU RAM before returning to Ray Object Store
         local_weights = {k: v.cpu() for k, v in self.local_model.state_dict().items()}
         
         return local_weights, generalization_gap

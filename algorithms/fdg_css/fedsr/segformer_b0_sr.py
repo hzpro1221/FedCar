@@ -9,6 +9,14 @@ class SegFormerB0_SR(nn.Module):
         num_classes,
         z_dim=128
     ):
+        """
+        Initializes the SegFormer-B0 model adapted for Federated Structural Regularization (FedSR).
+        This variant introduces a probabilistic latent space to compute L2R and CMI losses.
+
+        Args:
+            num_classes (int): Number of target semantic categories.
+            z_dim (int): Dimension of the latent representation 'z'.
+        """
         super(SegFormerB0_SR, self).__init__()
         
         self.config = SegformerConfig(
@@ -21,6 +29,7 @@ class SegFormerB0_SR(nn.Module):
             decoder_hidden_size=256,
             semantic_loss_ignore_index=255
         )
+        
         self.z_dim = z_dim
         self.model = SegformerForSemanticSegmentation(self.config)
 
@@ -28,33 +37,57 @@ class SegFormerB0_SR(nn.Module):
 
         self.to_z_params = nn.Conv2d(
             self.config.decoder_hidden_size, 
-            z_dim * 2, 
+            self.z_dim * 2, 
             kernel_size=1
         )
 
-        self.fc_class = nn.Conv2d(z_dim, num_classes, kernel_size=1)        
+        self.fc_class = nn.Conv2d(self.z_dim, num_classes, kernel_size=1)        
+
+        self.r_mu = nn.Parameter(torch.zeros(num_classes, self.z_dim))
+        self.r_sigma = nn.Parameter(torch.ones(num_classes, self.z_dim))
 
     def forward(self, x, return_dist=False):
+        """
+        Forward pass with optional reparameterization for Structural Regularization.
+
+        Args:
+            x (torch.Tensor): Input image tensor of shape [B, 3, H, W].
+            return_dist (bool): If True, returns the latent distributions (z, mu, sigma) 
+                                alongside logits. Typically True during local training.
+
+        Returns:
+            upsampled_logits (torch.Tensor): Logits upsampled to [B, num_classes, H, W].
+            z, z_mu, z_sigma (torch.Tensor, optional): Latent variables, returned if return_dist=True.
+        """
+        # Extract features from SegFormer decoder (shape: [B, hidden_size, H/4, W/4])
         outputs = self.model(x)
         features = outputs.logits 
         
-        # split mu và sigma
+        # Split features into latent mean (mu) and standard deviation (sigma)
         z_params = self.to_z_params(features)
         z_mu = z_params[:, :self.z_dim, :, :]
+        
+        # Use softplus to ensure standard deviation is strictly positive
         z_sigma = F.softplus(z_params[:, self.z_dim:, :, :]) 
 
+        # Reparameterization Trick: z = mu + sigma * epsilon
         if self.training and return_dist:
-            # z = mu + sigma * epsilon
             eps = torch.randn_like(z_sigma)
             z = z_mu + z_sigma * eps
         else:
-            # z = mu, this is for inference
+            # Deterministic latent representation for evaluation/inference
             z = z_mu 
 
+        # Generate prediction logits from the latent variable 'z'
         logits = self.fc_class(z)
 
-        # Upsampling
-        upsampled_logits = F.interpolate(logits, size=x.shape[2:], mode='bilinear', align_corners=False)
+        # Bi-linear up-sampling to restore the original input spatial resolution
+        upsampled_logits = F.interpolate(
+            logits, 
+            size=x.shape[2:], 
+            mode='bilinear', 
+            align_corners=False
+        )
 
         if return_dist:
             return upsampled_logits, z, z_mu, z_sigma

@@ -10,11 +10,9 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, ConcatDataset
 import numpy as np
 import random
-import copy
 from tqdm import tqdm
 
 from algorithms.dataset_pytorch import BDD100KDataset, CityscapesDataset, GTA5Dataset, MapillaryDataset, SynthiaDataset
-
 from .segformer_b0_spc_net import SegFormerB0_SPC_Net
 
 class SPC_Net:
@@ -22,93 +20,49 @@ class SPC_Net:
         self, 
         num_classes,
         source_domains,
+        
         num_epochs, 
         batch_size,
+        num_sample,          
+        max_steps_per_epch,    
+        num_workers,
+
         init_lr,
         min_lr,
         power,
         weight_decay,
-        max_steps_per_epch=10
+        ema_decay
     ):
         print("\n" + "="*50)
         print("[Trainer] Initializing SPC_Net Trainer...")
         self.num_classes = num_classes
-
-        self.backbone_model = SegFormerB0_SPC_Net(num_classes=self.num_classes)
-        
         self.source_domains = source_domains
+        self.num_datasets = len(self.source_domains)
+        self.ema_decay = ema_decay
         
-        num_datasets = len(self.source_domains)
         self.backbone_model = SegFormerB0_SPC_Net(
             num_classes=self.num_classes, 
-            num_datasets=num_datasets
+            num_datasets=self.num_datasets
         )        
         
         self.num_epochs = num_epochs
         self.batch_size = batch_size
+        self.num_sample = num_sample
+        self.max_steps_per_epch = max_steps_per_epch
+        self.num_workers = num_workers
         
         self.init_lr = init_lr
         self.min_lr = min_lr
         self.power = power
         self.weight_decay = weight_decay
-        self.max_steps_per_epch = max_steps_per_epch * len(self.source_domains)
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"[Trainer] Global device set to: {self.device}")
-        print(f"[Trainer] Source domains to COMBINE: {self.source_domains}")
-        print(f"[Trainer] Total Epochs: {self.num_epochs}")
-
         self.backbone_model.to(self.device)
 
-        print("[Trainer] Loading and concatenating datasets...")
-        datasets_list = []
-        for domain in self.source_domains:
-            if domain == 'cityscape':
-                datasets_list.append(CityscapesDataset(
-                    images_dir="/root/KhaiDD/FedCar/dataset/cityscape/leftImg8bit/train",
-                    labels_dir="/root/KhaiDD/FedCar/dataset/cityscape/gtFine/train"
-                ))
-            elif domain == "bdd100":
-                datasets_list.append(BDD100KDataset(
-                    images_dir="/root/KhaiDD/FedCar/dataset/bdd100/10k/train",
-                    labels_dir="/root/KhaiDD/FedCar/dataset/bdd100/labels/train"
-                ))
-            elif domain == "gta5":
-                datasets_list.append(GTA5Dataset(
-                    list_of_paths=[
-                        "/root/KhaiDD/FedCar/dataset/gta5/gta5_part1",
-                        "/root/KhaiDD/FedCar/dataset/gta5/gta5_part2",
-                        "/root/KhaiDD/FedCar/dataset/gta5/gta5_part3",
-                        "/root/KhaiDD/FedCar/dataset/gta5/gta5_part4",
-                        "/root/KhaiDD/FedCar/dataset/gta5/gta5_part5",
-                        "/root/KhaiDD/FedCar/dataset/gta5/gta5_part6",
-                        "/root/KhaiDD/FedCar/dataset/gta5/gta5_part7",
-                    ]
-                ))
-            elif domain == "mapillary":
-                datasets_list.append(MapillaryDataset(
-                    root_dir="/root/KhaiDD/FedCar/dataset/mapillary/training"
-                ))
-            elif domain == "synthia":
-                datasets_list.append(SynthiaDataset(
-                    root_dir="/root/KhaiDD/FedCar/dataset/synthia/RAND_CITYSCAPES",
-                    start_index=0,
-                    end_index=6580
-                ))
+        print(f"[Trainer] Device: {self.device}")
+        print(f"[Trainer] Domains: {self.source_domains} | Samples per domain: {self.num_sample}")
 
-        # Concatenate all dataset into one
-        self.combined_dataset = ConcatDataset(datasets_list)
-        
-        self.train_dataloader = DataLoader(
-            self.combined_dataset,
-            batch_size=self.batch_size,
-            shuffle=True,
-            num_workers=4,
-            pin_memory=True
-        )
-        print(f"[Trainer] Combined Dataset Size: {len(self.combined_dataset)} images.")
-        print(f"[Trainer] Total batches per epoch: {len(self.train_dataloader)}")
-        print("="*50 + "\n")
+        self._prepare_datasets()
 
         self.optimizer = optim.AdamW(
             self.backbone_model.parameters(), 
@@ -117,39 +71,84 @@ class SPC_Net:
         )
         self.criterion = nn.CrossEntropyLoss(ignore_index=255)
         
-        total_iters = self.num_epochs * len(self.train_dataloader)
+        total_iters = self.num_epochs * self.max_steps_per_epch
         self.scheduler = optim.lr_scheduler.PolynomialLR(
             self.optimizer, 
             total_iters=total_iters, 
             power=self.power
         )
 
+    def _prepare_datasets(self):
+        print("[Trainer] Loading datasets...")
+        datasets_list = []
+        for domain in self.source_domains:
+            if domain == 'cityscape':
+                datasets_list.append(CityscapesDataset(
+                    images_dir="/root/KhaiDD/FedCar/dataset/cityscape/leftImg8bit/train",
+                    labels_dir="/root/KhaiDD/FedCar/dataset/cityscape/gtFine/train",
+                    num_sample=self.num_sample
+                ))
+            elif domain == "bdd100":
+                datasets_list.append(BDD100KDataset(
+                    images_dir="/root/KhaiDD/FedCar/dataset/bdd100/10k/train",
+                    labels_dir="/root/KhaiDD/FedCar/dataset/bdd100/labels/train",
+                    num_sample=self.num_sample
+                ))
+            elif domain == "gta5":
+                datasets_list.append(GTA5Dataset(
+                    list_of_paths=[f"/root/KhaiDD/FedCar/dataset/gta5/gta5_part{i}" for i in range(1, 8)],
+                    num_sample=self.num_sample
+                ))
+            elif domain == "mapillary":
+                datasets_list.append(MapillaryDataset(
+                    root_dir="/root/KhaiDD/FedCar/dataset/mapillary/training",
+                    num_sample=self.num_sample
+                ))
+            elif domain == "synthia":
+                datasets_list.append(SynthiaDataset(
+                    root_dir="/root/KhaiDD/FedCar/dataset/synthia/RAND_CITYSCAPES",
+                    start_index=0,
+                    end_index=6580,
+                    num_sample=self.num_sample
+                ))
+
+        self.combined_dataset = ConcatDataset(datasets_list)
+        self.train_dataloader = DataLoader(
+            self.combined_dataset,
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=self.num_workers,
+            pin_memory=True
+        )
+        print(f"[Trainer] Total combined images: {len(self.combined_dataset)}")
+        print("="*50 + "\n")
+
     def set_seed(self, seed): 
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
         torch.cuda.manual_seed(seed)
-        print(f"[Trainer] Global seed set to {seed}.")
+        torch.backends.cudnn.deterministic = True
+        print(f"[Trainer] Seed set to {seed}")
 
     def train(self, checkpoint_path):
-        print(f"\n[Trainer] Starting SPC_Net Training for {self.num_epochs} epochs.")
+        print(f"[Trainer] Starting training for {self.num_epochs} epochs.")
         self.backbone_model.train()
 
-        epoch_pbar = tqdm(range(self.num_epochs), desc="Epochs", position=0)
-
-        for epoch in epoch_pbar:
+        for epoch in range(self.num_epochs):
             running_loss = 0.0
+            pbar = tqdm(self.train_dataloader, desc=f"Epoch {epoch+1}/{self.num_epochs}")
             
-            batch_pbar = tqdm(self.train_dataloader, desc=f"Epoch {epoch+1}", leave=False)
-            
-            for step, (images, masks) in enumerate(batch_pbar):
-                if (step > self.max_steps_per_epch):
+            for step, (images, masks) in enumerate(pbar):
+                if step >= self.max_steps_per_epch:
                     break
                     
                 images, masks = images.to(self.device), masks.to(self.device)
                 
                 self.optimizer.zero_grad()
-                outputs = self.backbone_model(images)
+
+                outputs = self.backbone_model(images, masks)
+                
                 loss = self.criterion(outputs, masks)
                 loss.backward()
                 self.optimizer.step()
@@ -157,12 +156,9 @@ class SPC_Net:
                 self.scheduler.step() 
                 
                 running_loss += loss.item()
-                batch_pbar.set_postfix({"Loss": f"{loss.item():.4f}"})
+                pbar.set_postfix({"Loss": f"{loss.item():.4f}", "LR": f"{self.scheduler.get_last_lr()[0]:.6f}"})
 
-            avg_epoch_loss = running_loss / min(self.max_steps_per_epch + 1, len(self.train_dataloader))
-            epoch_pbar.set_postfix({"Avg Loss": f"{avg_epoch_loss:.4f}"})
-
-        print(f"\n[Trainer] Training complete. Saving global model to {checkpoint_path}")
+        print(f"[Trainer] Saving model to {checkpoint_path}")
         torch.save(self.backbone_model.state_dict(), checkpoint_path)
         return self.backbone_model
     
@@ -182,35 +178,41 @@ class SPC_Net:
         if target_domain == 'cityscape':
             dataset = CityscapesDataset(
                 images_dir="/root/KhaiDD/FedCar/dataset/cityscape/leftImg8bit/val",
-                labels_dir="/root/KhaiDD/FedCar/dataset/cityscape/gtFine/val"
+                labels_dir="/root/KhaiDD/FedCar/dataset/cityscape/gtFine/val",
+                num_sample=int(self.num_sample / 10)
             )
         elif target_domain == "bdd100":
             dataset = BDD100KDataset(
                 images_dir="/root/KhaiDD/FedCar/dataset/bdd100/10k/val",
-                labels_dir="/root/KhaiDD/FedCar/dataset/bdd100/labels/val"
+                labels_dir="/root/KhaiDD/FedCar/dataset/bdd100/labels/val",
+                num_sample=int(self.num_sample / 10)
             )
         elif target_domain == "gta5":
             dataset = GTA5Dataset(
                 list_of_paths=[
-                    # "/root/KhaiDD/FedCar/dataset/gta5/gta5_part8",
-                    # "/root/KhaiDD/FedCar/dataset/gta5/gta5_part9",
+                    "/root/KhaiDD/FedCar/dataset/gta5/gta5_part8",
+                    "/root/KhaiDD/FedCar/dataset/gta5/gta5_part9",
                     "/root/KhaiDD/FedCar/dataset/gta5/gta5_part10"
-                ]
+                ],
+                num_sample=int(self.num_sample / 10)
             )
         elif target_domain == "mapillary":
             dataset = MapillaryDataset(
-                root_dir="/root/KhaiDD/FedCar/dataset/mapillary/validation"
+                root_dir="/root/KhaiDD/FedCar/dataset/mapillary/validation",
+                num_sample=int(self.num_sample / 10)
             ) 
         elif target_domain == "synthia":
             dataset = SynthiaDataset(
                 root_dir="/root/KhaiDD/FedCar/dataset/synthia/RAND_CITYSCAPES",
-                start_index=6580
+                start_index=6580,
+                end_index=None,
+                num_sample=int(self.num_sample / 10)
             )
         
         self.test_dataloader = DataLoader(
             dataset,
             batch_size=self.batch_size,
-            num_workers=2,
+            num_workers=self.num_workers,
             pin_memory=True
         )
         print(f"[Trainer] Dataset loaded. Total batches to evaluate: {len(self.test_dataloader)}")

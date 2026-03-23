@@ -1,8 +1,14 @@
+import sys
+import os
+
+project_root = os.getcwd()
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.data import DataLoader
 import ray
 
 from algorithms.fdgcss.our.utils.augment_dataloader import get_augmented_dataloader
@@ -14,31 +20,40 @@ class FedCovMatch_Client:
         data,
         client_id,
         local_model,
+        
+        num_rounds,      
         num_epoch,
         batch_size,
+        num_workers,    
+        
         init_lr,
         min_lr,
         power,
         weight_decay,
-        lam_cov=1.0,      
-        lam_syn=1.0,      
-        lam_cons=1.0,     
-        proj_dim=64,      
-        num_classes=19,
-        max_steps_per_epch=10 
+        
+        lam_cov,      
+        lam_syn,      
+        lam_cons,     
+        proj_dim,      
+        max_steps_per_epch,
+        num_classes=19
     ):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.client_id = client_id
         self.data = data
         self.local_model = local_model.to(self.device)
 
+        self.num_rounds = num_rounds
         self.num_epoch = num_epoch
         self.batch_size = batch_size
-        self.init_lr = init_lr
-        self.power = power
-        self.weight_decay = weight_decay
+        self.num_workers = num_workers
         self.max_steps_per_epch = max_steps_per_epch
         
+        self.init_lr = init_lr
+        self.min_lr = min_lr
+        self.power = power
+        self.weight_decay = weight_decay
+
         self.lam_cov = lam_cov
         self.lam_syn = lam_syn
         self.lam_cons = lam_cons
@@ -48,23 +63,22 @@ class FedCovMatch_Client:
         ds_map = {"cityscape": "Cityscapes", "bdd100": "BDD100K", "gta5": "GTA5", "mapillary": "Mapillary", "synthia": "Synthia"}
         
         self.syn_dataloader = get_augmented_dataloader(
-            root_dir="/root/KhaiDD/FedCar/dataset/augment_data",
+            root_dir="dataset/augment_data", 
             dataset_names=[ds_map[self.data]], 
             batch_size=self.batch_size,
-            shuffle=True
+            shuffle=True,
+            num_workers=self.num_workers 
         )
-        
-        self.num_samples = len(self.syn_dataloader.dataset)
+        self.total_samples = len(self.syn_dataloader.dataset)
 
-        self.optimizer = optim.AdamW(self.local_model.parameters(), lr=init_lr, weight_decay=weight_decay)
         self.criterion_seg = nn.CrossEntropyLoss(ignore_index=255)
         self.criterion_cons = nn.MSELoss() 
-        self.scheduler = optim.lr_scheduler.PolynomialLR(self.optimizer, total_iters=num_epoch, power=self.power)
 
     def train(self, global_parameters, global_stats, P_matrix):
         self.local_model.load_state_dict(global_parameters)
         self.local_model.to(self.device)
         self.local_model.train()
+        
         P_matrix = P_matrix.to(self.device)
         
         for c in range(self.num_classes):
@@ -75,13 +89,24 @@ class FedCovMatch_Client:
         s_kc = torch.zeros(self.num_classes, self.proj_dim, device=self.device)
         Q_kc = torch.zeros(self.num_classes, self.proj_dim, self.proj_dim, device=self.device)
         
+        self.optimizer = optim.AdamW(
+            self.local_model.parameters(), 
+            lr=self.init_lr, 
+            weight_decay=self.weight_decay
+        )
+
+        self.scheduler = optim.lr_scheduler.PolynomialLR(
+            self.optimizer, 
+            total_iters=self.num_epoch * self.max_steps_per_epch, 
+            power=self.power
+        )
+
         for epoch in range(self.num_epoch):
             for step, (x_real, x_syn, y) in enumerate(self.syn_dataloader):
-                if step > self.max_steps_per_epch: 
+                if step >= self.max_steps_per_epch: 
                     break
                 
                 x_real, x_syn, y = x_real.to(self.device), x_syn.to(self.device), y.to(self.device)
-                
                 self.optimizer.zero_grad()
                 
                 logits_real, F_real = self.local_model.forward_features(x_real)
@@ -113,7 +138,6 @@ class FedCovMatch_Client:
                     mask_c = (y_flat == c) 
                     
                     Z_kc_real = F_flat_real[mask_c] 
-                    
                     if Z_kc_real.size(0) >= 2: 
                         Z_tilde_real = torch.matmul(Z_kc_real, P_matrix) 
                         mu_batch_real = Z_tilde_real.mean(dim=0)
@@ -123,13 +147,13 @@ class FedCovMatch_Client:
                         if c in global_stats:
                             L_cov += torch.norm(Sigma_batch_real - global_stats[c]['Sigma'], p='fro')**2
                             
-                        n_kc[c] += Z_tilde_real.size(0)
-                        s_kc[c] += Z_tilde_real.sum(dim=0)
-                        Q_kc[c] += torch.matmul(Z_tilde_real.T, Z_tilde_real)
+                        Z_det = Z_tilde_real.detach()
+                        n_kc[c] += Z_det.size(0)
+                        s_kc[c] += Z_det.sum(dim=0)
+                        Q_kc[c] += torch.matmul(Z_det.T, Z_det)
 
                     if c in global_stats:
                         Z_kc_syn = F_flat_syn[mask_c]
-                        
                         if Z_kc_syn.size(0) >= 2:
                             Z_tilde_syn = torch.matmul(Z_kc_syn, P_matrix)
                             mu_batch_syn = Z_tilde_syn.mean(dim=0)
@@ -141,17 +165,16 @@ class FedCovMatch_Client:
 
                 if valid_syn_classes > 0 and global_stats:
                     mean_dist_syn = dist_syn_total / valid_syn_classes
-                    dynamic_syn_weight = torch.exp(-mean_dist_syn) 
+                    dynamic_syn_weight = torch.exp(-mean_dist_syn).detach() 
                 else:
                     dynamic_syn_weight = torch.tensor(1.0, device=self.device)
 
-                total_Loss = L_real + self.lam_cov * L_cov \
-                           + dynamic_syn_weight * (self.lam_syn * L_syn + self.lam_cons * L_cons)
+                # total loss
+                total_Loss = L_real + self.lam_cov * L_cov + dynamic_syn_weight * (self.lam_syn * L_syn + self.lam_cons * L_cons)
                 
                 total_Loss.backward()
                 self.optimizer.step()
-
-            self.scheduler.step()
+                self.scheduler.step()
 
         local_weights = {k: v.cpu() for k, v in self.local_model.state_dict().items()}
         moments = {
@@ -159,4 +182,5 @@ class FedCovMatch_Client:
             's_kc': s_kc.cpu(),
             'Q_kc': Q_kc.cpu()
         }
-        return local_weights, self.num_samples, moments
+        num_samples_trained = min(self.max_steps_per_epch * self.batch_size, self.total_samples)
+        return local_weights, num_samples_trained, moments

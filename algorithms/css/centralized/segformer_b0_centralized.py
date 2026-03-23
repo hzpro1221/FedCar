@@ -5,8 +5,17 @@ from transformers import SegformerConfig, SegformerForSemanticSegmentation
 
 class SegFormerB0_Centralized(nn.Module):
     def __init__(self, num_classes):
+        """
+        Implementation of the SegFormer-B0 architecture for Centralized Semantic Segmentation.
+        This model utilizes a hierarchical Mix Transformer (MiT) backbone and a lightweight 
+        All-MLP decoder.
+        
+        Args:
+            num_classes (int): Number of target semantic categories for the segmentation task.
+        """
         super(SegFormerB0_Centralized, self).__init__()
         
+        # Configure SegFormer-B0 parameterss
         self.config = SegformerConfig(
             num_labels=num_classes,
             widths=[32, 64, 160, 256],
@@ -21,13 +30,24 @@ class SegFormerB0_Centralized(nn.Module):
         self.model = SegformerForSemanticSegmentation(self.config)
 
     def forward(self, x):
+        """
+        Forward pass for the SegFormer model.
+        
+        Args:
+            x (torch.Tensor): Input image batch with shape [B, 3, H, W].
+            
+        Returns:
+            upsampled_logits (torch.Tensor): Prediction logits bilinearly interpolated 
+                                             to match the original input resolution [B, num_classes, H, W].
+        """
         outputs = self.model(x)
 
-        # [B, num_classes, 128, 128]
+        # SegFormer's MLP decoder produces logits at 1/4 of the input spatial resolution 
+        # (e.g., [B, num_classes, 128, 128] for a 512x512 input). 
         logits = outputs.logits  
 
-        # Up-sampling to [B, num_classes, 512, 512] (because label is this shape).
-        # Seem like author of this paper deliberately shrink the dimension to H/4 :vv..
+        # Bi-linear interpolation is applied to restore the spatial resolution to the original input size.
+        # This alignment is crucial for pixel-wise loss computation during training and mIoU evaluation.
         upsampled_logits = F.interpolate(
             logits, 
             size=x.shape[2:], 
