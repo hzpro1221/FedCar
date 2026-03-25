@@ -12,6 +12,7 @@ import copy
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 import ray
+import wandb 
 
 from algorithms.dataset_pytorch import BDD100KDataset, CityscapesDataset, GTA5Dataset, MapillaryDataset, SynthiaDataset
 
@@ -38,25 +39,6 @@ class FedAvg_GA_Server:
         weight_decay,
         ga_step_size
     ):
-        """
-        Initializes the Federated Learning Server with Generalization Adjustment (FedAvg + GA).
-
-        Args:
-            num_classes (int): Number of classes for the segmentation task.
-            backbone_model (nn.Module): The global backbone model (e.g., SegFormer-B0).
-            source_domains (list): List of source domains/datasets used for training.
-            num_rounds (int): Total number of communication rounds.
-            num_epochs (int): Number of local epochs for each client per round.
-            batch_size (int): Batch size for local client training and server evaluation.
-            num_workers (int): Number of subprocesses for data loading.
-            num_sample (int): Number of samples to load per dataset (loads all if None).
-            max_steps_per_epch (int): Maximum number of training steps per epoch for clients.
-            init_lr (float): Initial learning rate for the optimizer.
-            min_lr (float): Minimum learning rate for the scheduler.
-            power (float): Power factor for the polynomial learning rate scheduler.
-            weight_decay (float): Weight decay coefficient for the AdamW optimizer.
-            ga_step_size (float): Step size parameter (d) for Generalization Adjustment.
-        """
         print("\n" + "="*50)
         print("[Server] Initializing FedAvg + GA Server...")
         self.num_classes = num_classes
@@ -119,9 +101,6 @@ class FedAvg_GA_Server:
         print(f"[Server] Global seed set to {seed}.")
     
     def aggregate(self, local_weights_list, gaps_list, round_idx):
-        """
-        Generalization Adjustment (GA) aggregation.
-        """
         print(f"[Server] Generalization Gaps: {[f'{g:.4f}' for g in gaps_list]}")
         
         mu = sum(gaps_list) / self.num_clients
@@ -154,7 +133,7 @@ class FedAvg_GA_Server:
         print("[Server] Aggregation complete.")
         return avg_weights
 
-    def train(self, checkpoint_path):
+    def train(self, target_domain, checkpoint_path):
         print(f"\n[Server] Commencing Federated Learning process for {self.num_rounds} rounds.")
         global_weights = self.backbone_model.state_dict()
         round_pbar = tqdm(range(self.num_rounds), desc="Round", position=0)
@@ -183,70 +162,85 @@ class FedAvg_GA_Server:
             )
             print("[Server] Updating global backbone model with aggregated weights.")
             self.backbone_model.load_state_dict(global_weights)
-            round_pbar.set_description(f"Num Finished Round {round_idx + 1}")
+            
+            print(f"[Server] Evaluating Round {round_idx + 1}...")
+            miou, pixel_acc, _ = self.evaluate(target_domain=target_domain, checkpoint_path=None)
+            
+            wandb.log({
+                "Round": round_idx + 1,
+                "Round_Test_mIoU": miou * 100,
+                "Round_Test_Pixel_Accuracy": pixel_acc * 100
+            })
+
+            round_pbar.set_description(f"Round {round_idx + 1} | mIoU: {miou*100:.2f}%")
 
         print(f"\n[Server] Training complete. Saving global model to {checkpoint_path}")
         torch.save(self.backbone_model.state_dict(), checkpoint_path)
         return self.backbone_model
     
-    def evaluate(self, target_domain, checkpoint_path):
-        """
-        Evaluates the global model on a specified target domain.
-        """
+    def evaluate(self, target_domain, checkpoint_path=None):
         print("\n" + "="*50)
         print(f"[Server] Starting evaluation on Target Domain: {target_domain}")
 
-        self.backbone_model.load_state_dict(torch.load(checkpoint_path, map_location=self.device))
+        if checkpoint_path is not None:
+            self.backbone_model.load_state_dict(torch.load(checkpoint_path, map_location=self.device))
+            print(f"[Server] Loaded checkpoint from {checkpoint_path}")
+            
         self.backbone_model.to(self.device)
         self.backbone_model.eval()
-        print(f"[Server] Loaded checkpoint from {checkpoint_path}")
 
         conf_matrix = torch.zeros(self.num_classes, self.num_classes).to(self.device)
 
-        print(f"[Server] Loading dataset for {target_domain}...")
-        dataset=None
-        if target_domain == 'cityscape':
-            dataset = CityscapesDataset(
-                images_dir="dataset/cityscape/leftImg8bit/val",
-                labels_dir="dataset/cityscape/gtFine/val",
-                num_sample=int(self.num_sample / 10)
+        if not hasattr(self, 'test_dataloader'):
+            print(f"[Server] Loading dataset for {target_domain} (First time only)...")
+            eval_num_sample = int(self.num_sample / 10) if self.num_sample is not None else None
+            dataset = None
+            
+            if target_domain == 'cityscape':
+                dataset = CityscapesDataset(
+                    images_dir="dataset/cityscape/leftImg8bit/val",
+                    labels_dir="dataset/cityscape/gtFine/val",
+                    num_sample=eval_num_sample
+                )
+            elif target_domain == "bdd100":
+                dataset = BDD100KDataset(
+                    images_dir="dataset/bdd100/10k/val",
+                    labels_dir="dataset/bdd100/labels/val",
+                    num_sample=eval_num_sample
+                )
+            elif target_domain == "gta5":
+                dataset = GTA5Dataset(
+                    list_of_paths=[
+                        "dataset/gta5/gta5_part8",
+                        "dataset/gta5/gta5_part9",
+                        "dataset/gta5/gta5_part10"
+                    ],
+                    num_sample=eval_num_sample
+                )
+            elif target_domain == "mapillary":
+                dataset = MapillaryDataset(
+                    root_dir="dataset/mapillary/validation",
+                    num_sample=eval_num_sample
+                ) 
+            elif target_domain == "synthia":
+                dataset = SynthiaDataset(
+                    root_dir="dataset/synthia/RAND_CITYSCAPES",
+                    start_index=6580,
+                    end_index=None,
+                    num_sample=eval_num_sample
+                )
+            else:
+                raise ValueError(f"Unknown target domain: {target_domain}")
+            
+            self.test_dataloader = DataLoader(
+                dataset,
+                batch_size=self.batch_size,
+                shuffle=False,
+                num_workers=self.num_workers,
+                pin_memory=True
             )
-        elif target_domain == "bdd100":
-            dataset = BDD100KDataset(
-                images_dir="dataset/bdd100/10k/val",
-                labels_dir="dataset/bdd100/labels/val",
-                num_sample=int(self.num_sample / 10)
-            )
-        elif target_domain == "gta5":
-            dataset = GTA5Dataset(
-                list_of_paths=[
-                    "dataset/gta5/gta5_part8",
-                    "dataset/gta5/gta5_part9",
-                    "dataset/gta5/gta5_part10"
-                ],
-                num_sample=int(self.num_sample / 10)
-            )
-        elif target_domain == "mapillary":
-            dataset = MapillaryDataset(
-                root_dir="dataset/mapillary/validation",
-                num_sample=int(self.num_sample / 10)
-            ) 
-        elif target_domain == "synthia":
-            dataset = SynthiaDataset(
-                root_dir="dataset/synthia/RAND_CITYSCAPES",
-                start_index=6580,
-                end_index=None,
-                num_sample=int(self.num_sample / 10)
-            )
-        
-        self.test_dataloader = DataLoader(
-            dataset,
-            batch_size=self.batch_size,
-            shuffle=True,
-            num_workers=self.num_workers,
-            pin_memory=True
-        )
-        print(f"[Server] Dataset loaded. Total batches to evaluate: {len(self.test_dataloader)}")
+            
+        print(f"[Server] Total batches to evaluate: {len(self.test_dataloader)}")
         
         print("[Server] Starting inference loop...")
         with torch.no_grad():
@@ -254,11 +248,10 @@ class FedAvg_GA_Server:
                 images = images.to(self.device)
                 masks = masks.to(self.device)
 
-                outputs = self.backbone_model(images) # Output: [B, 19, 512, 512]
+                outputs = self.backbone_model(images) 
 
-                preds = torch.argmax(outputs, dim=1) # Preds: [B, 512, 512]
+                preds = torch.argmax(outputs, dim=1) 
                 
-                # Only calculate on pixel that is not 255 
                 mask_valid = (masks != 255)
                 
                 target = masks[mask_valid]
@@ -282,6 +275,4 @@ class FedAvg_GA_Server:
         print("\n" + "="*40)
         print(f"Evaluate result: \n- mIoU: {miou*100:.2f}%\n- Pixel Accuracy: {pixel_acc*100:.2f}%")
         print("="*40)
-        for i, iou in enumerate(iou_per_class):
-            print(f"Class {i:2d}: {iou.item()*100:.2f}%")
         return miou, pixel_acc, iou_per_class

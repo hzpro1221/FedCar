@@ -12,11 +12,6 @@ class BDD100KDataset(Dataset):
         image_size = (512, 512),
         num_sample = None  
     ):
-        """
-            images_dir: path to image.
-            labels_dir: path to label.
-            num_sample: number of samples to load (loads all if None).
-        """
         self.images_dir = images_dir
         self.labels_dir = labels_dir
         self.image_size = image_size

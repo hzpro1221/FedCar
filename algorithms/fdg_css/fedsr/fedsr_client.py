@@ -18,7 +18,6 @@ import time
 
 from algorithms.dataset_pytorch import BDD100KDataset, CityscapesDataset, GTA5Dataset, MapillaryDataset, SynthiaDataset
 
-# The num_gpus for each worker is fixed at 0.2 because there are only 5 domains total, allowing up to 5 concurrent clients.
 @ray.remote(num_gpus=0.2)
 class FedSR_Client:
     def __init__(
@@ -43,27 +42,6 @@ class FedSR_Client:
         alpha, 
         beta
     ):
-        """
-        Initializes the Federated Learning Client for FedSR (Federated Structural Regularization).
-
-        Args:
-            data (str): Target domain/dataset for this client.
-            client_id (int/str): Unique client identifier.
-            local_model (nn.Module): The local PyTorch model.
-            num_sample (int): Number of training samples to load.
-            num_epoch (int): Local training epochs.
-            batch_size (int): Batch size for DataLoader.
-            num_workers (int): Number of data loading workers.
-            num_classes (int): Number of semantic classes.
-            init_lr (float): Initial learning rate.
-            min_lr (float): Minimum learning rate.
-            power (float): Power for the PolynomialLR.
-            weight_decay (float): Weight decay for AdamW.
-            max_steps_per_epch (int): Max batches to process per epoch.
-            z_dim (int): Dimension of the latent representation 'z'.
-            alpha (float): Weight coefficient for L2 Regularization (L2R).
-            beta (float): Weight coefficient for Conditional Mutual Information (CMI) loss.
-        """
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.client_id = client_id
         self.data = data
@@ -86,7 +64,6 @@ class FedSR_Client:
         self.beta = beta
         self.z_dim = z_dim
 
-        # Init dataloader
         if self.data == 'cityscape':
             self.dataset = CityscapesDataset(
                 images_dir="dataset/cityscape/leftImg8bit/train",
@@ -137,17 +114,6 @@ class FedSR_Client:
         self.criterion = nn.CrossEntropyLoss(ignore_index=255)
 
     def train(self, global_parameters):
-        """
-        Executes local training with Structural Regularization (L2R & CMI).
-
-        Args:
-            global_parameters (dict): Aggregated model weights from the server.
-
-        Returns:
-            tuple: 
-                - local_weights (dict): Updated local weights (moved to CPU).
-                - total_samples (int): Client's dataset size.
-        """
         self.local_model.load_state_dict(global_parameters)
         self.local_model.to(self.device)
         self.local_model.train()
@@ -179,7 +145,6 @@ class FedSR_Client:
                 
                 loss = self.criterion(logits, masks)
                 
-                # Shrink the size of mask to match latent space 'z' (for GPU efficiency)
                 small_masks = F.interpolate(
                     masks.unsqueeze(1).float(), 
                     size=z.shape[2:], 
@@ -193,10 +158,8 @@ class FedSR_Client:
                 z_sigma_valid = z_sigma.permute(0, 2, 3, 1)[valid_mask]
                 y_valid = small_masks[valid_mask]
                 
-                # L2 Regularization
                 loss_l2r = z_valid.norm(dim=1).mean()
                 
-                # Conditional Mutual Information (CMI) Loss
                 r_sigma_softplus = F.softplus(self.local_model.r_sigma)
                 r_mu_batch = self.local_model.r_mu[y_valid]       
                 r_sigma_batch = r_sigma_softplus[y_valid]
@@ -205,7 +168,6 @@ class FedSR_Client:
                            (z_sigma_valid**2 + (z_mu_valid - r_mu_batch)**2) / (2 * r_sigma_batch**2) - 0.5
                 loss_cmi = loss_cmi.sum(dim=1).mean()
 
-                # Total loss combination
                 total_loss = loss + self.alpha * loss_l2r + self.beta * loss_cmi
                 
                 total_loss.backward()

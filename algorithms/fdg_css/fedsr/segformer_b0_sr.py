@@ -9,14 +9,6 @@ class SegFormerB0_SR(nn.Module):
         num_classes,
         z_dim=128
     ):
-        """
-        Initializes the SegFormer-B0 model adapted for Federated Structural Regularization (FedSR).
-        This variant introduces a probabilistic latent space to compute L2R and CMI losses.
-
-        Args:
-            num_classes (int): Number of target semantic categories.
-            z_dim (int): Dimension of the latent representation 'z'.
-        """
         super(SegFormerB0_SR, self).__init__()
         
         self.config = SegformerConfig(
@@ -47,41 +39,22 @@ class SegFormerB0_SR(nn.Module):
         self.r_sigma = nn.Parameter(torch.ones(num_classes, self.z_dim))
 
     def forward(self, x, return_dist=False):
-        """
-        Forward pass with optional reparameterization for Structural Regularization.
-
-        Args:
-            x (torch.Tensor): Input image tensor of shape [B, 3, H, W].
-            return_dist (bool): If True, returns the latent distributions (z, mu, sigma) 
-                                alongside logits. Typically True during local training.
-
-        Returns:
-            upsampled_logits (torch.Tensor): Logits upsampled to [B, num_classes, H, W].
-            z, z_mu, z_sigma (torch.Tensor, optional): Latent variables, returned if return_dist=True.
-        """
-        # Extract features from SegFormer decoder (shape: [B, hidden_size, H/4, W/4])
         outputs = self.model(x)
         features = outputs.logits 
         
-        # Split features into latent mean (mu) and standard deviation (sigma)
         z_params = self.to_z_params(features)
         z_mu = z_params[:, :self.z_dim, :, :]
         
-        # Use softplus to ensure standard deviation is strictly positive
         z_sigma = F.softplus(z_params[:, self.z_dim:, :, :]) 
 
-        # Reparameterization Trick: z = mu + sigma * epsilon
         if self.training and return_dist:
             eps = torch.randn_like(z_sigma)
             z = z_mu + z_sigma * eps
         else:
-            # Deterministic latent representation for evaluation/inference
             z = z_mu 
 
-        # Generate prediction logits from the latent variable 'z'
         logits = self.fc_class(z)
 
-        # Bi-linear up-sampling to restore the original input spatial resolution
         upsampled_logits = F.interpolate(
             logits, 
             size=x.shape[2:], 

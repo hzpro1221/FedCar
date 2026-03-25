@@ -13,23 +13,18 @@ import torchvision.transforms.functional as TF
 from torch.utils.data import random_split
 from torch.utils.data import DataLoader, ConcatDataset
 import numpy as np
-import random
 import copy
 from tqdm import tqdm
-
+import wandb
 from algorithms.dataset_pytorch import BDD100KDataset, CityscapesDataset, GTA5Dataset, MapillaryDataset, SynthiaDataset
 
-from segformer_b0_sens_aug import SegFormerB0_SensAug
+from .segformer_b0_sens_aug import SegFormerB0_SensAug
 
-# perturbation list
 REDUCED_PERTURBATIONS = ["blur", "noise", "brightness", "saturation", "hue"]
 
 def apply_perturbation(image, p_type, level):
-    """
-    Applies a specific visual perturbation to a tensor image [C, H, W].
-    'level' typically scales from 1 (mild) to 5 (severe).
-    """
-    if p_type == "none": return image
+    if p_type == "none": 
+        return image
 
     if p_type == "blur":
         k_size = int(level * 2 + 1)
@@ -39,7 +34,6 @@ def apply_perturbation(image, p_type, level):
         return torch.clamp(image + torch.randn_like(image) * (level * 0.05), 0.0, 1.0)
     
     elif p_type == "brightness":
-        # level 1-5 -> factor 0.7 to 1.3 (darker/lighter)
         factor = 1.0 + (level * 0.06) if level > 0 else 1.0 + (level * 0.06)
         return TF.adjust_brightness(image, factor)
 
@@ -52,7 +46,6 @@ def apply_perturbation(image, p_type, level):
     return image
 
 class SensAugDatasetWrapper(torch.utils.data.Dataset):
-    """Wrapper that applies dynamic perturbations based on a computed PDF."""
     def __init__(self, base_dataset):
         self.base_dataset = base_dataset
         self.pdf_keys = [("none", 0)]
@@ -74,33 +67,25 @@ class SensAugDatasetWrapper(torch.utils.data.Dataset):
             image = apply_perturbation(image, p_type, level)
         return image, mask
 
-class SensAugTrainer:
+class SensAug:
     def __init__(
         self, 
         num_classes, 
         source_domains, 
-        dataset_root,
-
         num_epochs, 
         batch_size, 
+        num_workers, 
         num_sample, 
         max_steps_per_epch,
-        
         init_lr, 
         min_lr, 
         power, 
         weight_decay, 
-        num_workers, 
-        seed,
-
-        sa_val_ratio, 
-        max_sa_batches, 
-        prob_clean
+        dataset_root="dataset",     
+        sa_val_ratio=0.1,            
+        max_sa_batches=20,           
+        prob_clean=0.5               
     ):
-        """
-        SensAug Trainer: Periodically analyzes model sensitivity to various image 
-        perturbations and adjusts data augmentation probability accordingly.
-        """
         print("\n" + "="*50)
         print("[SensAug] Initializing Sensitivity-Aware Trainer...")
         
@@ -123,12 +108,10 @@ class SensAugTrainer:
         self.weight_decay = weight_decay
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        if seed: self.set_seed(seed)
 
         self.backbone_model = SegFormerB0_SensAug(num_classes=self.num_classes)
         self.backbone_model.to(self.device)
 
-        # Dataset initialization with SA split
         self._prepare_datasets(sa_val_ratio)
         
         print(f"[SensAug] Setup Complete. Clean Image Prob: {self.prob_clean*100}%")
@@ -142,7 +125,6 @@ class SensAugTrainer:
         torch.backends.cudnn.deterministic = True
 
     def _prepare_datasets(self, sa_val_ratio):
-        """Prepares combined dataset and splits a portion for sensitivity analysis."""
         datasets = []
         for domain in self.source_domains:
             path = os.path.join(self.dataset_root, domain)
@@ -184,15 +166,13 @@ class SensAugTrainer:
         self.sa_train_wrapper = SensAugDatasetWrapper(self.raw_train_set)
 
         self.train_dataloader = DataLoader(self.sa_train_wrapper, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers, pin_memory=True)
-        self.sa_val_dataloader = DataLoader(self.sa_val_set, batch_size=self.batch_size, shuffle=False, num_workers=2)
+        self.sa_val_dataloader = DataLoader(self.sa_val_set, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
 
-        # Optimizer & Scheduler
         self.optimizer = optim.AdamW(self.backbone_model.parameters(), lr=self.init_lr, weight_decay=self.weight_decay)
         self.criterion = nn.CrossEntropyLoss(ignore_index=255)
         self.scheduler = optim.lr_scheduler.PolynomialLR(self.optimizer, total_iters=self.num_epochs * self.max_steps_per_epch, power=self.power)
 
     def run_sensitivity_analysis(self):
-        """Evaluates model vulnerability to perturbations and updates augmentation PDF."""
         print("[SensAug] Analyzing model sensitivity...")
         self.backbone_model.eval()
         miou_record = {}
@@ -227,14 +207,17 @@ class SensAugTrainer:
         self.sa_train_wrapper.update_pdf(pdf_dict)
         print(f"[SensAug] Top Sensitivity: {max(miou_record, key=miou_record.get)} (mIoU: {min(miou_record.values()):.4f})")
 
-    def train(self, checkpoint_path):
-        """Main training loop with periodic sensitivity analysis."""
+    def train(self, target_domain, checkpoint_path):
+        print(f"[Trainer] Starting SensAug training for {self.num_epochs} epochs.")
+        
         for epoch in range(self.num_epochs):
             self.run_sensitivity_analysis()
             
             self.backbone_model.train()
-            pbar = tqdm(self.train_dataloader, desc=f"Epoch {epoch+1}/{self.num_epochs}")
+            epoch_loss = 0.0
+            num_steps = 0
             
+            pbar = tqdm(self.train_dataloader, desc=f"Epoch {epoch+1}/{self.num_epochs}")
             for step, (images, masks) in enumerate(pbar):
                 if step >= self.max_steps_per_epch: break
                 
@@ -245,79 +228,98 @@ class SensAugTrainer:
                 self.optimizer.step()
                 self.scheduler.step()
                 
+                epoch_loss += loss.item()
+                num_steps += 1
                 pbar.set_postfix({"Loss": f"{loss.item():.4f}"})
 
+            avg_train_loss = epoch_loss / max(num_steps, 1)
+
+            print(f"\n[Trainer] Evaluating Epoch {epoch + 1}...")
+            miou, pixel_acc, _ = self.evaluate(target_domain=target_domain, checkpoint_path=None)
+            
+            wandb.log({
+                "Epoch": epoch + 1,
+                "Train_Loss": avg_train_loss,
+                "Epoch_Test_mIoU": miou * 100,
+                "Epoch_Test_Pixel_Accuracy": pixel_acc * 100
+            })
+
+        print(f"[Trainer] Training finished. Model saved at: {checkpoint_path}")
         torch.save(self.backbone_model.state_dict(), checkpoint_path)
         return self.backbone_model
 
-    def evaluate(self, target_domain, checkpoint_path):
+    def evaluate(self, target_domain, checkpoint_path=None):
         print("\n" + "="*50)
         print(f"[Trainer] Starting evaluation on Target Domain: {target_domain}")
 
-        self.backbone_model.load_state_dict(torch.load(checkpoint_path, map_location=self.device))
-        self.backbone_model.to(self.device)
+        if checkpoint_path is not None:
+            self.backbone_model.load_state_dict(torch.load(checkpoint_path, map_location=self.device))
+            print(f"[Trainer] Loaded checkpoint from {checkpoint_path}")
+            
         self.backbone_model.eval()
-        print(f"[Trainer] Loaded checkpoint from {checkpoint_path}")
 
-        conf_matrix = torch.zeros(self.num_classes, self.num_classes).to(self.device)
-
-        print(f"[Trainer] Loading dataset for {target_domain}...")
-        dataset=None
-        if target_domain == 'cityscape':
-            dataset = CityscapesDataset(
-                images_dir="/root/KhaiDD/FedCar/dataset/cityscape/leftImg8bit/val",
-                labels_dir="/root/KhaiDD/FedCar/dataset/cityscape/gtFine/val",
-                num_sample=int(self.num_sample / 10)
+        if not hasattr(self, 'test_dataloader'):
+            print(f"[Trainer] Loading dataset for {target_domain} (First time only)...")
+            path = os.path.join(self.dataset_root, target_domain)
+            dataset = None
+            eval_n = int(self.num_sample / 10) if self.num_sample is not None else None
+            
+            if target_domain == 'cityscape':
+                dataset = CityscapesDataset(
+                    images_dir=os.path.join(path, "leftImg8bit/val"),
+                    labels_dir=os.path.join(path, "gtFine/val"),
+                    num_sample=eval_n
+                )
+            elif target_domain == "bdd100":
+                dataset = BDD100KDataset(
+                    images_dir=os.path.join(path, "10k/val"),
+                    labels_dir=os.path.join(path, "labels/val"),
+                    num_sample=eval_n
+                )
+            elif target_domain == "gta5":
+                dataset = GTA5Dataset(
+                    list_of_paths=[
+                        os.path.join(path, "gta5_part8"),
+                        os.path.join(path, "gta5_part9"),
+                        os.path.join(path, "gta5_part10")
+                    ],
+                    num_sample=eval_n
+                )
+            elif target_domain == "mapillary":
+                dataset = MapillaryDataset(
+                    root_dir=os.path.join(path, "validation"),
+                    num_sample=eval_n
+                ) 
+            elif target_domain == "synthia":
+                dataset = SynthiaDataset(
+                    root_dir=os.path.join(path, "RAND_CITYSCAPES"),
+                    start_index=6580,
+                    end_index=None,
+                    num_sample=eval_n
+                )
+            
+            self.test_dataloader = DataLoader(
+                dataset,
+                batch_size=self.batch_size,
+                shuffle=False, 
+                num_workers=self.num_workers,
+                pin_memory=True
             )
-        elif target_domain == "bdd100":
-            dataset = BDD100KDataset(
-                images_dir="/root/KhaiDD/FedCar/dataset/bdd100/10k/val",
-                labels_dir="/root/KhaiDD/FedCar/dataset/bdd100/labels/val",
-                num_sample=int(self.num_sample / 10)
-            )
-        elif target_domain == "gta5":
-            dataset = GTA5Dataset(
-                list_of_paths=[
-                    "/root/KhaiDD/FedCar/dataset/gta5/gta5_part8",
-                    "/root/KhaiDD/FedCar/dataset/gta5/gta5_part9",
-                    "/root/KhaiDD/FedCar/dataset/gta5/gta5_part10",
-                    num_sample=int(self.num_sample / 10)
-                ]
-            )
-        elif target_domain == "mapillary":
-            dataset = MapillaryDataset(
-                root_dir="/root/KhaiDD/FedCar/dataset/mapillary/validation",
-                num_sample=int(self.num_sample / 10)
-            ) 
-        elif target_domain == "synthia":
-            dataset = SynthiaDataset(
-                root_dir="/root/KhaiDD/FedCar/dataset/synthia/RAND_CITYSCAPES",
-                start_index=6580,
-                end_index=None,
-                num_sample=int(self.num_sample / 10)
-            )
+            
+        print(f"[Trainer] Total batches to evaluate: {len(self.test_dataloader)}")
         
-        self.test_dataloader = DataLoader(
-            dataset,
-            batch_size=self.batch_size,
-            num_workers=2,
-            pin_memory=True
-        )
-        print(f"[Trainer] Dataset loaded. Total batches to evaluate: {len(self.test_dataloader)}")
+        conf_matrix = torch.zeros(self.num_classes, self.num_classes).to(self.device)
         
         print("[Trainer] Starting inference loop...")
         with torch.no_grad():
             for images, masks in tqdm(self.test_dataloader, desc="Evaluating"):
-                images = images.to(self.device)
-                masks = masks.to(self.device)
-
+                images, masks = images.to(self.device), masks.to(self.device)
                 outputs = self.backbone_model(images)
-
                 preds = torch.argmax(outputs, dim=1)
                 
-                mask_valid = (masks != 255)
-                target = masks[mask_valid]
-                predict = preds[mask_valid]
+                valid = (masks != 255)
+                target = masks[valid]
+                predict = preds[valid]
                 
                 indices = self.num_classes * target + predict
                 conf_matrix += torch.bincount(indices, minlength=self.num_classes**2).reshape(self.num_classes, self.num_classes)
@@ -329,12 +331,10 @@ class SensAugTrainer:
 
         iou_per_class = tp / (tp + fp + fn + 1e-10)
         miou = torch.mean(iou_per_class).item()
-
-        total_correct_pixels = torch.sum(tp)
-        total_valid_pixels = torch.sum(conf_matrix)
-        pixel_acc = (total_correct_pixels / (total_valid_pixels + 1e-10)).item()
+        pixel_acc = (torch.sum(tp) / (torch.sum(conf_matrix) + 1e-10)).item()
 
         print("\n" + "="*40)
         print(f"Evaluate result: \n- mIoU: {miou*100:.2f}%\n- Pixel Accuracy: {pixel_acc*100:.2f}%")
         print("="*40)
+        
         return miou, pixel_acc, iou_per_class

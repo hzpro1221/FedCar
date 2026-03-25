@@ -10,13 +10,8 @@ class CityscapesDataset(Dataset):
         images_dir, 
         labels_dir, 
         image_size = (512, 512),
-        num_sample = None  # Thêm tham số num_sample
+        num_sample = None  
     ):
-        """
-            images_dir: path to image.
-            labels_dir: path to label.
-            num_sample: number of samples to load (loads all if None).
-        """
         self.images_dir = images_dir
         self.labels_dir = labels_dir
         self.image_size = image_size
@@ -45,7 +40,7 @@ class CityscapesDataset(Dataset):
         self.mask_paths = self.mask_paths[:num_sample]
 
         self.mapping_256 = np.zeros(256, dtype=np.int64)
-        self.mapping_256[:] = 255 # void/ignore
+        self.mapping_256[:] = 255 
         
         self.mapping_256[7] = 0    # road
         self.mapping_256[8] = 1    # sidewalk

@@ -17,7 +17,6 @@ import time
 
 from algorithms.dataset_pytorch import BDD100KDataset, CityscapesDataset, GTA5Dataset, MapillaryDataset, SynthiaDataset
 
-# The num_gpus for each worker is fixed at 0.2 because there are only 5 domains total, allowing up to 5 concurrent clients.
 @ray.remote(num_gpus=0.2)
 class FedAvg_Client:
     def __init__(
@@ -37,24 +36,6 @@ class FedAvg_Client:
         weight_decay,
         max_steps_per_epch
     ):
-        """
-        Initializes the Federated Learning Client for the FedAvg algorithm.
-
-        Args:
-            data (str): The name of the domain/dataset used by this client (e.g., 'cityscape', 'gta5').
-            client_id (int/str): Unique identifier for the client.
-            local_model (nn.Module): The PyTorch model assigned to this client.
-            num_sample (int): Number of training samples to load from the dataset. Loads all if None.
-            num_epoch (int): Number of local training epochs.
-            batch_size (int): Batch size for the DataLoader.
-            num_workers (int): Number of subprocesses to use for data loading. # <--- THÊM COMMENT NÀY
-            init_lr (float): Initial learning rate for the optimizer.
-            min_lr (float): Minimum learning rate for the learning rate scheduler.
-            power (float): Power factor for the PolynomialLR scheduler.
-            weight_decay (float): Weight decay coefficient for the AdamW optimizer.
-            max_steps_per_epch (int): Maximum number of batches to process per epoch.
-        """
-
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.client_id = client_id
         self.data = data
@@ -72,7 +53,6 @@ class FedAvg_Client:
         self.weight_decay = weight_decay
         self.max_steps_per_epch = max_steps_per_epch
 
-        # Initialize the corresponding dataset based on the client's domain
         if self.data == 'cityscape':
             self.dataset = CityscapesDataset(
                 images_dir="dataset/cityscape/leftImg8bit/train",
@@ -128,18 +108,6 @@ class FedAvg_Client:
         self,
         global_parameters
     ):
-        """
-        Executes the local training process using the aggregated global weights.
-
-        Args:
-            global_parameters (dict): The latest aggregated model state_dict from the central server.
-
-        Returns:
-            tuple: 
-                - local_weights (dict): The updated state_dict of the local model (moved to CPU).
-                - num_samples_trained (int): The actual number of samples processed during this round.
-        """
-        # Load global weights and set model to training mode
         self.local_model.load_state_dict(global_parameters)
         self.local_model.to(self.device)
         self.local_model.train()

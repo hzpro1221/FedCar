@@ -12,6 +12,7 @@ import copy
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 import ray
+import wandb 
 
 from algorithms.dataset_pytorch import BDD100KDataset, CityscapesDataset, GTA5Dataset, MapillaryDataset, SynthiaDataset
 from .fedsr_client import FedSR_Client
@@ -37,27 +38,6 @@ class FedSR_Server:
         alpha=0.01,
         beta=0.001
     ):
-        """
-        Initializes the Federated Structural Regularization (FedSR) Server.
-
-        Args:
-            num_classes (int): Number of semantic categories.
-            backbone_model (nn.Module): Global backbone model instance.
-            source_domains (list): List of domain names used for training.
-            num_rounds (int): Number of communication rounds.
-            num_epochs (int): Local training epochs per round.
-            batch_size (int): Training batch size.
-            num_workers (int): Number of workers for data loading.
-            num_sample (int): Number of samples per domain to load.
-            max_steps_per_epch (int): Maximum steps per local epoch.
-            init_lr (float): Initial learning rate for local optimizers.
-            min_lr (float): Minimum learning rate for scheduler.
-            power (float): Power factor for PolynomialLR.
-            weight_decay (float): Weight decay for AdamW.
-            z_dim (int): Dimension of the probabilistic latent space.
-            alpha (float): Weight for L2 Regularization (L2R) loss.
-            beta (float): Weight for Conditional Mutual Information (CMI) loss.
-        """
         print("\n" + "="*50)
         print("[Server] Initializing FedSR Server...")
         self.num_classes = num_classes
@@ -113,7 +93,6 @@ class FedSR_Server:
         print("="*50 + "\n")
     
     def set_seed(self, seed): 
-        """Sets the global random seed for reproducibility."""
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
@@ -121,7 +100,6 @@ class FedSR_Server:
         print(f"[Server] Global seed set to {seed}.")
     
     def aggregate(self, local_weights_list, total_samples_list):
-        """Standard FedAvg aggregation based on local sample counts."""
         print("[Server] Starting weighted FedSR aggregation...")
         total_samples = sum(total_samples_list)
         
@@ -140,8 +118,7 @@ class FedSR_Server:
         print("[Server] Aggregation complete.")
         return avg_weights
 
-    def train(self, checkpoint_path):
-        """Executes the federated training process."""
+    def train(self, target_domain, checkpoint_path):
         print(f"\n[Server] Commencing FL for {self.num_rounds} rounds.")
         global_weights = self.backbone_model.state_dict()
         round_pbar = tqdm(range(self.num_rounds), desc="FL Round", position=0)
@@ -149,7 +126,6 @@ class FedSR_Server:
         for round_idx in round_pbar:
             print(f"\n--- Round {round_idx + 1}/{self.num_rounds} ---")
             
-            # Broadcast global weights to remote clients
             job_ids = [
                 client.train.remote(global_parameters=global_weights) 
                 for client in self.clients
@@ -160,77 +136,90 @@ class FedSR_Server:
             local_weights_list = [r[0] for r in results]
             total_samples_list = [r[1] for r in results]
 
-            # Aggregate client models
             global_weights = self.aggregate(
                 local_weights_list=local_weights_list, 
                 total_samples_list=total_samples_list
             )
 
             self.backbone_model.load_state_dict(global_weights)
-            round_pbar.set_description(f"Finished Round {round_idx + 1}")
+            
+            print(f"[Server] Evaluating Round {round_idx + 1}...")
+            miou, pixel_acc, _ = self.evaluate(target_domain=target_domain, checkpoint_path=None)
+            
+            wandb.log({
+                "Round": round_idx + 1,
+                "Round_Test_mIoU": miou * 100,
+                "Round_Test_Pixel_Accuracy": pixel_acc * 100
+            })
+
+            round_pbar.set_description(f"Round {round_idx + 1} | mIoU: {miou*100:.2f}%")
 
         print(f"\n[Server] Training complete. Saving model to {checkpoint_path}")
         torch.save(self.backbone_model.state_dict(), checkpoint_path)
         return self.backbone_model
     
-    def evaluate(self, target_domain, checkpoint_path):
-        """Evaluates the global model performance on a target domain."""
+    def evaluate(self, target_domain, checkpoint_path=None):
         print("\n" + "="*50)
         print(f"[Server] Evaluating on Target Domain: {target_domain}")
 
-        self.backbone_model.load_state_dict(torch.load(checkpoint_path, map_location=self.device))
+        if checkpoint_path is not None:
+            self.backbone_model.load_state_dict(torch.load(checkpoint_path, map_location=self.device))
+            print(f"[Server] Loaded checkpoint from {checkpoint_path}")
+            
         self.backbone_model.to(self.device)
         self.backbone_model.eval()
 
         conf_matrix = torch.zeros(self.num_classes, self.num_classes).to(self.device)
 
-        print(f"[Server] Loading {target_domain} evaluation dataset...")
-        dataset = None
-        if target_domain == 'cityscape':
-            dataset = CityscapesDataset(
-                images_dir="dataset/cityscape/leftImg8bit/val",
-                labels_dir="dataset/cityscape/gtFine/val",
-                num_sample=int(self.num_sample / 10)
-            )
-        elif target_domain == "bdd100":
-            dataset = BDD100KDataset(
-                images_dir="dataset/bdd100/10k/val",
-                labels_dir="dataset/bdd100/labels/val",
-                num_sample=int(self.num_sample / 10)
-            )
-        elif target_domain == "gta5":
-            dataset = GTA5Dataset(
-                list_of_paths=["dataset/gta5/gta5_part10"],
-                num_sample=int(self.num_sample / 10)
-            )
-        elif target_domain == "mapillary":
-            dataset = MapillaryDataset(
-                root_dir="dataset/mapillary/validation",
-                num_sample=int(self.num_sample / 10)
-            ) 
-        elif target_domain == "synthia":
-            dataset = SynthiaDataset(
-                root_dir="dataset/synthia/RAND_CITYSCAPES",
-                start_index=6580,
-                num_sample=int(self.num_sample / 10)
+        if not hasattr(self, 'test_dataloader'):
+            print(f"[Server] Loading {target_domain} evaluation dataset (First time only)...")
+            eval_num_sample = int(self.num_sample / 10) if self.num_sample is not None else None
+            dataset = None
+            
+            if target_domain == 'cityscape':
+                dataset = CityscapesDataset(
+                    images_dir="dataset/cityscape/leftImg8bit/val",
+                    labels_dir="dataset/cityscape/gtFine/val",
+                    num_sample=eval_num_sample
+                )
+            elif target_domain == "bdd100":
+                dataset = BDD100KDataset(
+                    images_dir="dataset/bdd100/10k/val",
+                    labels_dir="dataset/bdd100/labels/val",
+                    num_sample=eval_num_sample
+                )
+            elif target_domain == "gta5":
+                dataset = GTA5Dataset(
+                    list_of_paths=["dataset/gta5/gta5_part10"],
+                    num_sample=eval_num_sample
+                )
+            elif target_domain == "mapillary":
+                dataset = MapillaryDataset(
+                    root_dir="dataset/mapillary/validation",
+                    num_sample=eval_num_sample
+                ) 
+            elif target_domain == "synthia":
+                dataset = SynthiaDataset(
+                    root_dir="dataset/synthia/RAND_CITYSCAPES",
+                    start_index=6580,
+                    num_sample=eval_num_sample
+                )
+            
+            self.test_dataloader = DataLoader(
+                dataset,
+                batch_size=self.batch_size,
+                shuffle=False, 
+                num_workers=self.num_workers,
+                pin_memory=True
             )
         
-        test_dataloader = DataLoader(
-            dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            pin_memory=True
-        )
-        
-        print(f"[Server] Running inference on {len(test_dataloader)} batches...")
+        print(f"[Server] Running inference on {len(self.test_dataloader)} batches...")
         with torch.no_grad():
-            for images, masks in tqdm(test_dataloader, desc="Inference"):
+            for images, masks in tqdm(self.test_dataloader, desc="Inference"):
                 images, masks = images.to(self.device), masks.to(self.device)
                 outputs = self.backbone_model(images)
                 preds = torch.argmax(outputs, dim=1)
                 
-                # Filter out ignore_index (255)
                 valid_mask = (masks != 255)
                 target = masks[valid_mask]
                 predict = preds[valid_mask]
@@ -240,7 +229,6 @@ class FedSR_Server:
                     indices, minlength=self.num_classes**2
                 ).reshape(self.num_classes, self.num_classes)
 
-        # Metric calculation
         tp = torch.diag(conf_matrix)
         fp = torch.sum(conf_matrix, dim=0) - tp
         fn = torch.sum(conf_matrix, dim=1) - tp

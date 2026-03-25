@@ -5,7 +5,6 @@ import argparse
 from tqdm import tqdm
 
 def download_file(url, dest_path):
-    # if file already exist -> skip
     if os.path.exists(dest_path):
         print(f"[SKIP] {os.path.basename(dest_path)} already exists.")
         return True
@@ -44,7 +43,6 @@ def extract_zip(zip_path, extract_to):
 def main(args):
     os.makedirs(args.dest_dir, exist_ok=True)
     
-    # remeber, each url is separated by a ','
     all_urls = [u.strip() for u in args.urls.split(',')]
     
     # The url list shoule be Part1_Img, Part1_Lbl, Part2_Img, Part2_Lbl...

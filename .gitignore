@@ -11,4 +11,5 @@ checkpoints_fdgcss
 results_css
 results_fdg_css
 results_fdgcss
+wandb
 **/__pycache__/

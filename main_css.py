@@ -10,34 +10,34 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 import torch
+import wandb
 
 from algorithms.css.centralized.centralized import Centralized
 from algorithms.css.spc_net.spc_net import SPC_Net 
 from algorithms.css.sens_aug.sens_aug import SensAug
 
-# ==========================================
-# EXPERIMENT CONFIGURATIONS
-# ==========================================
-ALGORITHMS = ["sens_aug"] # ["centralized", "spc_net", "sens_aug"] 
-
+ALGORITHMS = ["centralized", "spc_net", "sens_aug"] 
 # Leave-One-Domain-Out Setup
-ALL_DOMAINS = ["cityscape", "gta5", "mapillary"] 
+ALL_DOMAINS = ["cityscape", "gta5", "mapillary", "synthia", "bdd100"] 
 
-# TOTAL_EPOCHS = NUM_ROUNDS * NUM_EPOCHS (10 * 2 = 20)
-TOTAL_EPOCHS = 20 
-BATCH_SIZE = 8 
+TOTAL_EPOCHS = 500
+BATCH_SIZE = 16
+
+NUM_WORKERS = 4
+NUM_SAMPLE = 2000
+MAX_STEP_PER_EPCH = 100
+
 INIT_LR = 1e-3 
 MIN_LR = 2e-4
 POWER = 0.9
 WEIGHT_DECAY = 0.01
-SEEDS = [2024, 2025, 2026]  
+SEEDS = [2026]  
 
-# Hard fix
 NUM_CLASSES = 19
 
 CHECKPOINT_DIR = "checkpoints_css"
 RESULTS_DIR = "results_css"
-# ==========================================
+WANDB_PROJECT = "CSS" 
 
 def main():
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
@@ -52,7 +52,6 @@ def main():
         
         experiment_results[algo] = {}
 
-        # --- LEAVE-ONE-DOMAIN-OUT LOOP ---
         for target_domain in ALL_DOMAINS:
             source_domains = [d for d in ALL_DOMAINS if d != target_domain]
             
@@ -72,12 +71,36 @@ def main():
                 checkpoint_filename = f"{algo}_target_{target_domain}_seed_{seed}.pth"
                 checkpoint_path = os.path.join(CHECKPOINT_DIR, checkpoint_filename)
 
+                run_name = f"{algo.upper()}_{target_domain}_s{seed}"
+                wandb.init(
+                    project=WANDB_PROJECT,
+                    name=run_name,
+                    group=algo.upper(),          
+                    tags=["LODO", target_domain, "Centralized"], 
+                    reinit=True,                
+                    config={
+                        "algorithm": algo,
+                        "target_domain": target_domain,
+                        "source_domains": source_domains,
+                        "seed": seed,
+                        "num_epochs": TOTAL_EPOCHS,
+                        "batch_size": BATCH_SIZE,
+                        "init_lr": INIT_LR,
+                        "num_workers": NUM_WORKERS,             
+                        "num_sample": NUM_SAMPLE,                
+                        "max_steps_per_epch": MAX_STEP_PER_EPCH 
+                    }
+                )
+
                 if algo == "centralized":
                     trainer = Centralized(
                         num_classes=NUM_CLASSES,
                         source_domains=source_domains,
                         num_epochs=TOTAL_EPOCHS,
                         batch_size=BATCH_SIZE,
+                        num_workers=NUM_WORKERS,              
+                        num_sample=NUM_SAMPLE,                
+                        max_steps_per_epch=MAX_STEP_PER_EPCH,  
                         init_lr=INIT_LR,
                         min_lr=MIN_LR,
                         power=POWER,
@@ -89,6 +112,9 @@ def main():
                         source_domains=source_domains,
                         num_epochs=TOTAL_EPOCHS,
                         batch_size=BATCH_SIZE,
+                        num_workers=NUM_WORKERS,              
+                        num_sample=NUM_SAMPLE,                
+                        max_steps_per_epch=MAX_STEP_PER_EPCH, 
                         init_lr=INIT_LR,
                         min_lr=MIN_LR,
                         power=POWER,
@@ -100,6 +126,9 @@ def main():
                         source_domains=source_domains,
                         num_epochs=TOTAL_EPOCHS,
                         batch_size=BATCH_SIZE,
+                        num_workers=NUM_WORKERS,              
+                        num_sample=NUM_SAMPLE,                 
+                        max_steps_per_epch=MAX_STEP_PER_EPCH,  
                         init_lr=INIT_LR,
                         min_lr=MIN_LR,
                         power=POWER,
@@ -110,7 +139,7 @@ def main():
 
                 trainer.set_seed(seed)
 
-                trainer.train(checkpoint_path=checkpoint_path)
+                trainer.train(target_domain=target_domain, checkpoint_path=checkpoint_path)
 
                 gc.collect()
                 torch.cuda.empty_cache()
@@ -121,6 +150,11 @@ def main():
                     checkpoint_path=checkpoint_path
                 )
 
+                wandb.log({
+                    "Final_Test_mIoU": miou * 100,
+                    "Final_Test_Pixel_Accuracy": pixel_acc * 100
+                })
+
                 experiment_results[algo][target_domain]["miou_list"].append(miou)
                 experiment_results[algo][target_domain]["pixel_acc_list"].append(pixel_acc)
 
@@ -129,6 +163,9 @@ def main():
                 del trainer
                 gc.collect()
                 torch.cuda.empty_cache()
+                
+                wandb.finish()
+                
                 print("[Main] Done. Ready for the next run.")
 
             miou_mean = np.mean(experiment_results[algo][target_domain]["miou_list"])

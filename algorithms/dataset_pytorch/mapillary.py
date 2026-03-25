@@ -11,10 +11,6 @@ class MapillaryDataset(Dataset):
         image_size=(512, 512),
         num_sample=None  
     ):
-        """
-            root_dir: path to data folder
-            num_sample: number of samples to load (loads all if None).
-        """
         self.root_dir = root_dir
         self.image_size = image_size
         
@@ -40,7 +36,7 @@ class MapillaryDataset(Dataset):
         self.image_paths = self.image_paths[:num_sample]
         self.mask_paths = self.mask_paths[:num_sample]
 
-        self.mapping_256 = np.full(256, 255, dtype=np.int64) # By default, all irrelevant data are 255 (void/ignore)
+        self.mapping_256 = np.full(256, 255, dtype=np.int64)
         
         self.mapping_256[[7, 8, 13, 14, 23, 24]] = 0  # road
         self.mapping_256[[11, 15]]               = 1  # sidewalk

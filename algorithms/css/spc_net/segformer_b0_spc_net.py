@@ -36,13 +36,11 @@ class StyleRepresentation(nn.Module):
         distance = distance.mean(dim=2) 
 
         alpha = 1.0 / (1.0 + distance)
-        alpha = F.softmax(alpha, dim=1) # [B, num_prototype]
+        alpha = F.softmax(alpha, dim=1) 
 
-        # Mix styles based on alpha
         mixed_mu = torch.matmul(alpha, self.style_mu).view(batch, self.channel_size, 1, 1)
         mixed_sig = torch.matmul(alpha, self.style_sig).view(batch, self.channel_size, 1, 1)
 
-        # normalize & projecting
         fea = ((fea - cur_mu) / cur_sig) * mixed_sig + mixed_mu
         return fea
 
@@ -65,11 +63,9 @@ class SegFormerB0_SPC_Net(nn.Module):
         )
         self.segformer = SegformerModel(self.config)
 
-        # Style Representation
         self.style_adain1 = StyleRepresentation(num_prototype=num_datasets, channel_size=32)
         self.style_adain2 = StyleRepresentation(num_prototype=num_datasets, channel_size=64)
 
-        # All-MLP Decoder
         self.linear_c4 = nn.Conv2d(256, self.feature_dim, 1)
         self.linear_c3 = nn.Conv2d(160, self.feature_dim, 1)
         self.linear_c2 = nn.Conv2d(64, self.feature_dim, 1)
@@ -80,7 +76,6 @@ class SegFormerB0_SPC_Net(nn.Module):
             nn.ReLU(inplace=True)
         )
 
-        # Projected Clustering 
         self.register_buffer('prototypes', torch.randn(num_classes, num_datasets, self.feature_dim))
         self.feat_norm = nn.LayerNorm(self.feature_dim, eps=1e-5)
 
@@ -88,7 +83,6 @@ class SegFormerB0_SPC_Net(nn.Module):
 
     @torch.no_grad()
     def _update_prototypes_ema(self, features_flat, masks, h_f, w_f):
-        """Cập nhật Semantic Prototypes bằng EMA."""
         masks_down = F.interpolate(
             masks.unsqueeze(1).float(), 
             size=(h_f, w_f), 
@@ -113,8 +107,8 @@ class SegFormerB0_SPC_Net(nn.Module):
             if fea_k.shape[0] == 0:
                 continue
                 
-            sim_k = torch.matmul(F.normalize(fea_k, p=2, dim=1), norm_protos[k].T) # [N_k, M]
-            m_idx = torch.argmax(sim_k, dim=1) # [N_k]
+            sim_k = torch.matmul(F.normalize(fea_k, p=2, dim=1), norm_protos[k].T) 
+            m_idx = torch.argmax(sim_k, dim=1) 
             
             for m in range(self.num_datasets):
                 fea_k_m = fea_k[m_idx == m]
@@ -144,10 +138,10 @@ class SegFormerB0_SPC_Net(nn.Module):
 
         _c1 = self.linear_c1(c1)
 
-        _fused = self.linear_fuse(torch.cat([_c4, _c3, _c2, _c1], dim=1)) # [B, 256, H/4, W/4]
+        _fused = self.linear_fuse(torch.cat([_c4, _c3, _c2, _c1], dim=1))
 
         B, C, H_f, W_f = _fused.shape
-        fea_out_raw = _fused.permute(0, 2, 3, 1).reshape(-1, C) # [B*H*W, C]
+        fea_out_raw = _fused.permute(0, 2, 3, 1).reshape(-1, C) 
         fea_out = self.feat_norm(fea_out_raw)
 
         if self.training and masks is not None:
@@ -156,12 +150,12 @@ class SegFormerB0_SPC_Net(nn.Module):
         fea_out = F.normalize(fea_out, p=2, dim=1)
         norm_protos = F.normalize(self.prototypes, p=2, dim=2)
 
-        masks_sim = torch.einsum('nd,kmd->nmk', fea_out, norm_protos) # [N, M, K]
-        masks_max, _ = torch.max(masks_sim, dim=1) # [N, K]
+        masks_sim = torch.einsum('nd,kmd->nmk', fea_out, norm_protos) 
+        masks_max, _ = torch.max(masks_sim, dim=1) 
         
         main_out = masks_max * self.logit_scale
 
-        main_out = main_out.view(B, H_f, W_f, self.num_classes).permute(0, 3, 1, 2) # [B, 19, H/4, W/4]
+        main_out = main_out.view(B, H_f, W_f, self.num_classes).permute(0, 3, 1, 2) 
         upsampled_logits = F.interpolate(main_out, size=size, mode='bilinear', align_corners=False)
 
         return upsampled_logits

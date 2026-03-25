@@ -12,37 +12,31 @@ from torch.utils.data import DataLoader, ConcatDataset
 import numpy as np
 import random
 from tqdm import tqdm
+import wandb 
 
-from segformer_b0_centralized import SegFormerB0_Centralized
+from .segformer_b0_centralized import SegFormerB0_Centralized
 
 from algorithms.dataset_pytorch import (
     BDD100KDataset, CityscapesDataset, GTA5Dataset, 
     MapillaryDataset, SynthiaDataset
 )
 
-class CentralizedTrainer:
+class Centralized:
     def __init__(
         self, 
         num_classes,
         source_domains,
-        dataset_root,
-        
         num_epochs, 
         batch_size,
+        num_workers,
         num_sample, 
         max_steps_per_epch,
-        
         init_lr,
         min_lr,
         power,
         weight_decay,
-        num_workers,
-        seed
+        dataset_root="dataset" 
     ):
-        """
-        Centralized Training Baseline for Domain Generalization.
-        Combines multiple source domains into a single training pipeline.
-        """
         print("\n" + "="*50)
         print("[Trainer] Initializing Centralized Trainer...")
         
@@ -61,9 +55,6 @@ class CentralizedTrainer:
         self.weight_decay = weight_decay
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
-        if seed:
-            self.set_seed(seed)
 
         self.backbone_model = SegFormerB0_Centralized(
             num_classes=self.num_classes
@@ -77,7 +68,6 @@ class CentralizedTrainer:
         print("="*50 + "\n")
 
     def set_seed(self, seed):
-        """Ensures deterministic behavior across runs."""
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
@@ -86,10 +76,6 @@ class CentralizedTrainer:
         print(f"[Trainer] Global seed set to {seed}.")
 
     def _prepare_datasets(self):
-        """
-        Initializes and concatenates training datasets from all source domains.
-        Explicitly passes num_sample to each dataset for balanced training.
-        """
         print(f"[Trainer] Aggregating source datasets...")
         datasets_list = []
         
@@ -151,13 +137,13 @@ class CentralizedTrainer:
 
         print(f"[Trainer] Training pool size: {len(self.combined_dataset)} images.")
 
-    def train(self, checkpoint_path):
-        """Executes the full centralized training loop."""
+    def train(self, target_domain, checkpoint_path):
         print(f"[Trainer] Starting training for {self.num_epochs} epochs.")
         
         for epoch in range(self.num_epochs):
             self.backbone_model.train()
             epoch_loss = 0.0
+            num_steps = 0
             
             pbar = tqdm(self.train_dataloader, desc=f"Epoch {epoch+1}/{self.num_epochs}", leave=True)
             for step, (images, masks) in enumerate(pbar):
@@ -174,78 +160,92 @@ class CentralizedTrainer:
                 self.scheduler.step() 
                 
                 epoch_loss += loss.item()
+                num_steps += 1
                 pbar.set_postfix({"Loss": f"{loss.item():.4f}"})
+
+            avg_train_loss = epoch_loss / max(num_steps, 1)
+
+            print(f"\n[Trainer] Evaluating Epoch {epoch + 1}...")
+            miou, pixel_acc, _ = self.evaluate(target_domain=target_domain, checkpoint_path=None)
+            
+            wandb.log({
+                "Epoch": epoch + 1,
+                "Train_Loss": avg_train_loss,
+                "Epoch_Test_mIoU": miou * 100,
+                "Epoch_Test_Pixel_Accuracy": pixel_acc * 100
+            })
 
         print(f"[Trainer] Training finished. Model saved at: {checkpoint_path}")
         torch.save(self.backbone_model.state_dict(), checkpoint_path)
         return self.backbone_model
     
-    def evaluate(self, target_domain, checkpoint_path):
-        """
-        Evaluates the trained model on a specific target domain.
-        """
+    def evaluate(self, target_domain, checkpoint_path=None):
         print(f"\n[Trainer] Evaluating target domain: {target_domain}")
         
-        self.backbone_model.load_state_dict(torch.load(checkpoint_path, map_location=self.device))
+        if checkpoint_path is not None:
+            self.backbone_model.load_state_dict(torch.load(checkpoint_path, map_location=self.device))
+            print(f"[Trainer] Loaded checkpoint from {checkpoint_path}")
+            
         self.backbone_model.eval()
 
-        path = os.path.join(self.dataset_root, target_domain)
-        dataset = None
-        
-        if target_domain == 'cityscape':
-            dataset = CityscapesDataset(
-                images_dir=os.path.join(path, "leftImg8bit/val"),
-                labels_dir=os.path.join(path, "gtFine/val"),
-                num_sample=int(self.num_sample / 10)
-            )
-        elif target_domain == "bdd100":
-            dataset = BDD100KDataset(
-                images_dir=os.path.join(path, "10k/val"),
-                labels_dir=os.path.join(path, "labels/val"),
-                num_sample=int(self.num_sample / 10)
-            )
-        elif target_domain == "gta5":
-            dataset = GTA5Dataset(
-                list_of_paths=[
-                    os.path.join(path, "gta5_part8"),
-                    os.path.join(path, "gta5_part9"),
-                    os.path.join(path, "gta5_part10")
-                ],
-                num_sample=int(self.num_sample / 10)
-            )
-        elif target_domain == "mapillary":
-            dataset = MapillaryDataset(
-                root_dir=os.path.join(path, "validation"),
-                num_sample=int(self.num_sample / 10)
-            ) 
-        elif target_domain == "synthia":
-            dataset = SynthiaDataset(
-                root_dir=os.path.join(path, "RAND_CITYSCAPES"),
-                start_index=6580,
-                num_sample=int(self.num_sample / 10)
-            )
+        if not hasattr(self, 'test_dataloader'):
+            path = os.path.join(self.dataset_root, target_domain)
+            dataset = None
+            eval_n = int(self.num_sample / 10) if self.num_sample is not None else None
+            
+            if target_domain == 'cityscape':
+                dataset = CityscapesDataset(
+                    images_dir=os.path.join(path, "leftImg8bit/val"),
+                    labels_dir=os.path.join(path, "gtFine/val"),
+                    num_sample=eval_n
+                )
+            elif target_domain == "bdd100":
+                dataset = BDD100KDataset(
+                    images_dir=os.path.join(path, "10k/val"),
+                    labels_dir=os.path.join(path, "labels/val"),
+                    num_sample=eval_n
+                )
+            elif target_domain == "gta5":
+                dataset = GTA5Dataset(
+                    list_of_paths=[
+                        os.path.join(path, "gta5_part8"),
+                        os.path.join(path, "gta5_part9"),
+                        os.path.join(path, "gta5_part10")
+                    ],
+                    num_sample=eval_n
+                )
+            elif target_domain == "mapillary":
+                dataset = MapillaryDataset(
+                    root_dir=os.path.join(path, "validation"),
+                    num_sample=eval_n
+                ) 
+            elif target_domain == "synthia":
+                dataset = SynthiaDataset(
+                    root_dir=os.path.join(path, "RAND_CITYSCAPES"),
+                    start_index=6580,
+                    num_sample=eval_n
+                )
 
-        test_loader = DataLoader(
-            dataset, 
-            batch_size=self.batch_size, 
-            num_workers=self.num_workers,
-            shuffle=False
-        )
+            self.test_dataloader = DataLoader(
+                dataset, 
+                batch_size=self.batch_size, 
+                num_workers=self.num_workers,
+                shuffle=False, 
+                pin_memory=True
+            )
         
         conf_matrix = torch.zeros(self.num_classes, self.num_classes).to(self.device)
         
         with torch.no_grad():
-            for images, masks in tqdm(test_loader, desc=f"Eval {target_domain}"):
+            for images, masks in tqdm(self.test_dataloader, desc=f"Eval {target_domain}"):
                 images, masks = images.to(self.device), masks.to(self.device)
                 outputs = self.backbone_model(images)
                 preds = torch.argmax(outputs, dim=1)
                 
                 valid = (masks != 255)
-                # Calculate confusion matrix for mIoU
                 indices = self.num_classes * masks[valid] + preds[valid]
                 conf_matrix += torch.bincount(indices, minlength=self.num_classes**2).reshape(self.num_classes, self.num_classes)
 
-        # Performance Metrics
         tp = torch.diag(conf_matrix)
         fp = torch.sum(conf_matrix, dim=0) - tp
         fn = torch.sum(conf_matrix, dim=1) - tp
@@ -255,4 +255,4 @@ class CentralizedTrainer:
         pixel_acc = (torch.sum(tp) / (torch.sum(conf_matrix) + 1e-10)).item()
         
         print(f"[Trainer] Result for {target_domain}: mIoU = {miou*100:.2f}%, Pixel Acc = {pixel_acc*100:.2f}%")
-        return miou, pixel_acc
+        return miou, pixel_acc, iou_per_class

@@ -12,6 +12,7 @@ import copy
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 import ray
+import wandb 
 
 from algorithms.dataset_pytorch import BDD100KDataset, CityscapesDataset, GTA5Dataset, MapillaryDataset, SynthiaDataset
 
@@ -43,31 +44,6 @@ class FedAvg_OMG_Server:
         omg_momentum,
         omg_num_iter
     ):
-        """
-        Initializes the Federated Learning Server with On-server Matching Gradient (FedOMG).
-
-        Args:
-            num_classes (int): Number of semantic classes.
-            backbone_model (nn.Module): The global backbone model (e.g., SegFormer-B0).
-            source_domains (list): List of source domains/datasets for training.
-            num_rounds (int): Total communication rounds.
-            num_epochs (int): Number of local epochs for clients.
-            batch_size (int): Batch size for training and evaluation.
-            num_workers (int): Number of subprocesses for data loading.
-            num_sample (int): Number of samples to load per dataset (loads all if None).
-            max_steps_per_epch (int): Maximum training steps per epoch for clients.
-            init_lr (float): Initial learning rate.
-            min_lr (float): Minimum learning rate.
-            power (float): Power factor for polynomial LR scheduler.
-            weight_decay (float): Weight decay coefficient.
-            cagrad_c (float): Parameter 'c' for CAGrad optimization.
-            global_lr (float): Global learning rate for updating server weights.
-            cagrad_c (float): Parameter 'c' for CAGrad optimization.
-            global_lr (float): Global learning rate for updating server weights.
-            omg_lr (float): Learning rate for the internal SGD optimizer in CAGrad.
-            omg_momentum (float): Momentum for the internal SGD optimizer.
-            omg_num_iter (int): Number of iterations to optimize the task weights 'w'.
-        """
         print("\n" + "="*50)
         print("[Server] Initializing FedAvg + OMG Server...")
         self.num_classes = num_classes
@@ -132,17 +108,6 @@ class FedAvg_OMG_Server:
         print(f"[Server] Global seed set to {seed}.")
     
     def OMG(self, grad_vec, num_tasks, cagrad_c):
-        """
-        Computes the On-server Matching Gradient (CAGrad) across all domain gradients.
-        
-        Args:
-            grad_vec (torch.Tensor): Flattened gradients from all clients. Shape: [num_tasks, total_flattened_params].
-            num_tasks (int): Number of participating clients/domains.
-            cagrad_c (float): The CAGrad constraint parameter 'c'.
-            
-        Returns:
-            torch.Tensor: The optimized aggregated global gradient.
-        """
         grads = grad_vec
         GG = grads.mm(grads.t()).cpu()
         scale = (torch.diag(GG) + 1e-4).sqrt().mean()
@@ -198,7 +163,7 @@ class FedAvg_OMG_Server:
                 domain_grad_vector = torch.cat(domain_grad_diff)
                 all_domain_grads.append(domain_grad_vector)
             
-        all_domain_grads_tensor = torch.stack(all_domain_grads) # [num_tasks, total_params]
+        all_domain_grads_tensor = torch.stack(all_domain_grads)
         omg_grads = self.OMG(all_domain_grads_tensor, num_tasks, self.cagrad_c)
         
         new_global_weights = copy.deepcopy(global_state_dict)
@@ -210,7 +175,6 @@ class FedAvg_OMG_Server:
             
             updated_param_delta = omg_grads[offset : offset + param_size].view(param_shape)
             
-            # W_new = W_old + global_lr * optimized_delta
             new_global_weights[name] = global_state_dict[name].to(self.device) + (updated_param_delta * self.global_lr)
             offset += param_size
 
@@ -223,7 +187,7 @@ class FedAvg_OMG_Server:
         print("[Server] FedAvg + OMG Aggregation complete.")
         return new_global_weights
 
-    def train(self, checkpoint_path):
+    def train(self, target_domain, checkpoint_path):
         print(f"\n[Server] Commencing Federated Learning process for {self.num_rounds} rounds.")
         global_weights = self.backbone_model.state_dict()
         round_pbar = tqdm(range(self.num_rounds), desc="Round", position=0)
@@ -246,67 +210,82 @@ class FedAvg_OMG_Server:
             )
 
             self.backbone_model.load_state_dict(global_weights)
-            round_pbar.set_description(f"Num Finished Round {round_idx + 1}")
+            
+            print(f"[Server] Evaluating Round {round_idx + 1}...")
+            miou, pixel_acc, _ = self.evaluate(target_domain=target_domain, checkpoint_path=None)
+            
+            wandb.log({
+                "Round": round_idx + 1,
+                "Round_Test_mIoU": miou * 100,
+                "Round_Test_Pixel_Accuracy": pixel_acc * 100
+            })
+
+            round_pbar.set_description(f"Round {round_idx + 1} | mIoU: {miou*100:.2f}%")
 
         torch.save(self.backbone_model.state_dict(), checkpoint_path)
         return self.backbone_model
 
-    def evaluate(self, target_domain, checkpoint_path):
-        """
-        Evaluates the global model on a specified target domain.
-        """
+    def evaluate(self, target_domain, checkpoint_path=None):
         print("\n" + "="*50)
         print(f"[Server] Starting evaluation on Target Domain: {target_domain}")
 
-        self.backbone_model.load_state_dict(torch.load(checkpoint_path, map_location=self.device))
+        if checkpoint_path is not None:
+            self.backbone_model.load_state_dict(torch.load(checkpoint_path, map_location=self.device))
+            print(f"[Server] Loaded checkpoint from {checkpoint_path}")
+            
         self.backbone_model.to(self.device)
         self.backbone_model.eval()
-        print(f"[Server] Loaded checkpoint from {checkpoint_path}")
 
         conf_matrix = torch.zeros(self.num_classes, self.num_classes).to(self.device)
 
-        print(f"[Server] Loading dataset for {target_domain}...")
-        dataset=None
-        if target_domain == 'cityscape':
-            dataset = CityscapesDataset(
-                images_dir="dataset/cityscape/leftImg8bit/val",
-                labels_dir="dataset/cityscape/gtFine/val",
-                num_sample=int(self.num_sample / 10)
+        if not hasattr(self, 'test_dataloader'):
+            print(f"[Server] Loading dataset for {target_domain} (First time only)...")
+            eval_num_sample = int(self.num_sample / 10) if self.num_sample is not None else None
+            dataset=None
+            
+            if target_domain == 'cityscape':
+                dataset = CityscapesDataset(
+                    images_dir="dataset/cityscape/leftImg8bit/val",
+                    labels_dir="dataset/cityscape/gtFine/val",
+                    num_sample=eval_num_sample
+                )
+            elif target_domain == "bdd100":
+                dataset = BDD100KDataset(
+                    images_dir="dataset/bdd100/10k/val",
+                    labels_dir="dataset/bdd100/labels/val",
+                    num_sample=eval_num_sample
+                )
+            elif target_domain == "gta5":
+                dataset = GTA5Dataset(
+                    list_of_paths=[
+                        "dataset/gta5/gta5_part10"
+                    ],
+                    num_sample=eval_num_sample
+                )
+            elif target_domain == "mapillary":
+                dataset = MapillaryDataset(
+                    root_dir="dataset/mapillary/validation",
+                    num_sample=eval_num_sample
+                ) 
+            elif target_domain == "synthia":
+                dataset = SynthiaDataset(
+                    root_dir="dataset/synthia/RAND_CITYSCAPES",
+                    start_index=6580, 
+                    end_index=None,
+                    num_sample=eval_num_sample
+                )
+            else:
+                raise ValueError(f"Unknown target domain: {target_domain}")
+            
+            self.test_dataloader = DataLoader(
+                dataset,
+                batch_size=self.batch_size,
+                shuffle=False, 
+                num_workers=self.num_workers, 
+                pin_memory=True
             )
-        elif target_domain == "bdd100":
-            dataset = BDD100KDataset(
-                images_dir="dataset/bdd100/10k/val",
-                labels_dir="dataset/bdd100/labels/val",
-                num_sample=int(self.num_sample / 10)
-            )
-        elif target_domain == "gta5":
-            dataset = GTA5Dataset(
-                list_of_paths=[
-                    "dataset/gta5/gta5_part10"
-                ],
-                num_sample=int(self.num_sample / 10)
-            )
-        elif target_domain == "mapillary":
-            dataset = MapillaryDataset(
-                root_dir="dataset/mapillary/validation",
-                num_sample=int(self.num_sample / 10)
-            ) 
-        elif target_domain == "synthia":
-            dataset = SynthiaDataset(
-                root_dir="dataset/synthia/RAND_CITYSCAPES",
-                start_index=6580, 
-                end_index=None,
-                num_sample=int(self.num_sample / 10)
-            )
-        
-        self.test_dataloader = DataLoader(
-            dataset,
-            batch_size=self.batch_size,
-            shuffle=True,
-            num_workers=self.num_workers, 
-            pin_memory=True
-        )
-        print(f"[Server] Dataset loaded. Total batches to evaluate: {len(self.test_dataloader)}")
+            
+        print(f"[Server] Total batches to evaluate: {len(self.test_dataloader)}")
         
         print("[Server] Starting inference loop...")
         with torch.no_grad():
@@ -340,6 +319,5 @@ class FedAvg_OMG_Server:
         print("\n" + "="*40)
         print(f"Evaluate result: \n- mIoU: {miou*100:.2f}%\n- Pixel Accuracy: {pixel_acc*100:.2f}%")
         print("="*40)
-        for i, iou in enumerate(iou_per_class):
-            print(f"Class {i:2d}: {iou.item()*100:.2f}%")
+
         return miou, pixel_acc, iou_per_class

@@ -9,12 +9,8 @@ class GTA5Dataset(Dataset):
         self, 
         list_of_paths, 
         image_size = (512, 512),
-        num_sample = None  # Thêm tham số num_sample
+        num_sample = None  
     ):
-        """
-            list_of_paths: list of paths to GTA5 parts (e.g., ['/data/gta5/part1', '/data/gta5/part2'])
-            num_sample: number of samples to load (loads all if None).
-        """
         self.list_of_paths = list_of_paths
         
         self.image_paths = []

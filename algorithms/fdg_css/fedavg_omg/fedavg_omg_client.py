@@ -17,7 +17,6 @@ import time
 
 from algorithms.dataset_pytorch import BDD100KDataset, CityscapesDataset, GTA5Dataset, MapillaryDataset, SynthiaDataset
 
-# The num_gpus for each worker is fixed at 0.2 because there are only 5 domains total, allowing up to 5 concurrent clients.
 @ray.remote(num_gpus=0.2)
 class FedAvg_OMG_Client:
     def __init__(
@@ -37,25 +36,6 @@ class FedAvg_OMG_Client:
         weight_decay,
         max_steps_per_epch
     ):
-        """
-        Initializes the Federated Learning Client for the FedOMG (On-server Matching Gradient) framework.
-        Note: The client-side operation is identical to standard FedAvg, as the OMG logic occurs purely on the server.
-
-        Args:
-            data (str): The name of the domain/dataset used by this client.
-            client_id (int/str): Unique identifier for the client.
-            local_model (nn.Module): The PyTorch model assigned to this client.
-            num_sample (int): Number of training samples to load.
-            num_epoch (int): Number of local training epochs.
-            batch_size (int): Batch size for the DataLoader.
-            num_workers (int): Number of subprocesses for data loading.
-            init_lr (float): Initial learning rate for the optimizer.
-            min_lr (float): Minimum learning rate.
-            power (float): Power factor for PolynomialLR scheduler.
-            weight_decay (float): Weight decay coefficient for the AdamW optimizer.
-            max_steps_per_epch (int): Maximum number of batches to process per epoch.
-        """
-
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.client_id = client_id
         self.data = data
@@ -73,7 +53,6 @@ class FedAvg_OMG_Client:
         self.weight_decay = weight_decay
         self.max_steps_per_epch = max_steps_per_epch
 
-        # Initialize dataloader & optimizer & scheduler
         if self.data == 'cityscape':
             self.dataset = CityscapesDataset(
                 images_dir="dataset/cityscape/leftImg8bit/train",
@@ -130,17 +109,6 @@ class FedAvg_OMG_Client:
         )        
 
     def train(self, global_parameters):
-        """
-        Executes local training and returns the updated local weights for Server-side OMG aggregation.
-
-        Args:
-            global_parameters (dict): Aggregated model weights broadcasted from the server.
-
-        Returns:
-            tuple: 
-                - local_weights (dict): Updated local model weights (moved to CPU).
-                - total_samples (int): Number of total samples in the client's dataset.
-        """
         self.local_model.load_state_dict(global_parameters)
         self.local_model.to(self.device)
         self.local_model.train()

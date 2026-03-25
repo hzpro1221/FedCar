@@ -18,7 +18,6 @@ import time
 
 from algorithms.dataset_pytorch import BDD100KDataset, CityscapesDataset, GTA5Dataset, MapillaryDataset, SynthiaDataset
 
-# The num_gpus for each worker is fixed at 0.2 because there are only 5 domains total, allowing up to 5 concurrent clients.
 @ray.remote(num_gpus=0.2)
 class gPerXAN_Client:
     def __init__(
@@ -39,26 +38,6 @@ class gPerXAN_Client:
         max_steps_per_epch,
         reg_weight
     ):
-        """
-        Initializes the Generalized Personalized Cross-domain Adaptive Normalization (gPerXAN) Client.
-        This client implements Personalized FL by keeping Normalization parameters local 
-        and using a frozen Server Head for consistency regularization.
-
-        Args:
-            data (str): Target domain/dataset for this client.
-            client_id (int/str): Unique client identifier.
-            local_model (nn.Module): The local model with XON layers.
-            num_sample (int): Number of training samples to load.
-            num_epoch (int): Local training epochs.
-            batch_size (int): Batch size for DataLoader.
-            num_workers (int): Number of subprocesses for data loading.
-            init_lr (float): Initial learning rate.
-            min_lr (float): Minimum learning rate.
-            power (float): Power for PolynomialLR scheduler.
-            weight_decay (float): Weight decay for AdamW.
-            max_steps_per_epch (int): Max batches to process per epoch.
-            reg_weight (float): Weight for the Server-Head regularization loss.
-        """
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.client_id = client_id
         self.data = data
@@ -126,19 +105,6 @@ class gPerXAN_Client:
         self.criterion = nn.CrossEntropyLoss(ignore_index=255)
 
     def train(self, global_parameters):
-        """
-        Executes local training with Personalization and Server-Head Regularization.
-
-        Args:
-            global_parameters (dict): Aggregated model weights from the server.
-
-        Returns:
-            tuple: 
-                - local_weights (dict): Updated local weights (CPU).
-                - total_samples (int): Client's dataset size.
-        """
-        # --- Stage 1: Personalized Parameter Loading ---
-        # Keep local "norm" and "score_" parameters; update others from global weights.
         local_state = self.local_model.state_dict()
         for k, v in global_parameters.items():
             if "norm" not in k.lower() and "score_" not in k.lower():
@@ -148,8 +114,6 @@ class gPerXAN_Client:
         self.local_model.to(self.device)
         self.local_model.train()
 
-        # --- Stage 2: Frozen Server-Head Initialization ---
-        # The Server Head acts as a "knowledge anchor" to prevent local drift.
         server_head = copy.deepcopy(self.local_model.model.decode_head)
         server_head.eval()
         for param in server_head.parameters():
@@ -161,7 +125,6 @@ class gPerXAN_Client:
             weight_decay=self.weight_decay
         )
         
-        # Update scheduler for the current training round
         self.scheduler = optim.lr_scheduler.PolynomialLR(
             self.optimizer, 
             total_iters=self.num_epoch * self.max_steps_per_epch, 
@@ -190,7 +153,6 @@ class gPerXAN_Client:
                 
                 loss_reg = self.criterion(server_logits, masks)
 
-                # Balanced Total Loss
                 loss = loss_local + self.reg_weight * loss_reg
                 
                 loss.backward()

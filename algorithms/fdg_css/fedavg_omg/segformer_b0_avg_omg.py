@@ -5,12 +5,6 @@ from transformers import SegformerConfig, SegformerForSemanticSegmentation
 
 class SegFormerB0_Avg_OMG(nn.Module):
     def __init__(self, num_classes):
-        """
-        Initializes the SegFormer-B0 model for the FedOMG framework.
-
-        Args:
-            num_classes (int): Number of target semantic categories.
-        """
         super(SegFormerB0_Avg_OMG, self).__init__()
         
         self.config = SegformerConfig(
@@ -27,23 +21,9 @@ class SegFormerB0_Avg_OMG(nn.Module):
         self.model = SegformerForSemanticSegmentation(self.config)
 
     def forward(self, x):
-        """
-        Forward pass for semantic segmentation.
-
-        Args:
-            x (torch.Tensor): Input image tensor of shape [B, 3, H, W].
-
-        Returns:
-            torch.Tensor: Bilinearly upsampled logits of shape [B, num_classes, H, W].
-        """
         outputs = self.model(x)
-
-        # SegFormer decoder naturally outputs logits at 1/4 of the input resolution
-        # (e.g., [B, num_classes, 128, 128] for a 512x512 input)
         logits = outputs.logits  
 
-        # Bi-linear up-sampling to restore the original input resolution [B, num_classes, 512, 512].
-        # This aligns the output with ground truth mask dimensions for pixel-wise loss calculation.
         upsampled_logits = F.interpolate(
             logits, 
             size=x.shape[2:], 

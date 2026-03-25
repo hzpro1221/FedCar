@@ -37,7 +37,6 @@ def main(args):
 
     data_zip = os.path.join(args.dest_dir, args.zip_name)
 
-    # if download file is already exist -> skip
     if not os.path.exists(data_zip):
         download_file(
             url=args.download_url,
@@ -46,7 +45,6 @@ def main(args):
     else:
         print("File data is already exist")
     
-    # extract
     extract_zip(
         zip_path=data_zip,
         save_folder=args.dest_dir

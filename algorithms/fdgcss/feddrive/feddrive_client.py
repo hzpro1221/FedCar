@@ -18,10 +18,6 @@ from algorithms.dataset_pytorch import BDD100KDataset, CityscapesDataset, GTA5Da
 
 @ray.remote(num_gpus=0.2)
 class FedDrive_Client:
-    """
-    Ray Actor representing a single client in the Federated Learning setup.
-    Each client is responsible for training on a specific domain (dataset).
-    """
     def __init__(
         self,
         data,
@@ -106,18 +102,6 @@ class FedDrive_Client:
         )
 
     def train(self, global_parameters):
-        """
-        Executes a local training round for the client.
-        
-        Args:
-            global_parameters (dict): The global model's state_dict from the server.
-            
-        Returns:
-            tuple: (Updated local weights (CPU), Number of samples used)
-        """
-        # FedDrive Strategy: SiloBN / SiloNorm
-        # Retain local normalization statistics (BN/LayerNorm) while 
-        # updating other parameters with global weights.
         local_state = self.local_model.state_dict()
         local_norms = {k: v for k, v in local_state.items() if 'norm' in k or 'bn' in k}
         
@@ -145,14 +129,12 @@ class FedDrive_Client:
                 self.optimizer.zero_grad()
                 outputs = self.local_model(images)
                 
-                pixel_losses = self.criterion(outputs, masks) # Shape: [B, H, W]
+                pixel_losses = self.criterion(outputs, masks)
                 
-                # Filter out ignored indices (e.g., background/void class 255)
                 valid_mask = (masks != 255)
                 valid_losses = pixel_losses[valid_mask]
                 
                 if valid_losses.numel() > 0:
-                    # Select top-k pixels with the highest loss based on HNM percentage
                     k = max(1, int(self.hnm_perc * valid_losses.numel()))
                     topk_losses, _ = torch.topk(valid_losses, k)
                     loss = topk_losses.mean()

@@ -11,6 +11,7 @@ if project_root not in sys.path:
 
 import ray
 import torch
+import wandb
 
 from algorithms.fdg_css.fedavg.fedavg_server import FedAvg_Server
 from algorithms.fdg_css.fedavg.segformer_b0_avg import SegFormerB0_Avg
@@ -30,21 +31,18 @@ from algorithms.fdg_css.feddg.segformer_b0_dg import SegFormerB0_DG
 from algorithms.fdg_css.gperxan.gperxan_server import gPerXAN_Server
 from algorithms.fdg_css.gperxan.segformer_b0_gperxan import SegFormerB0_gPerXAN
 
-# ==========================================
-# EXPERIMENT CONFIGURATIONS
-# ==========================================
-ALGORITHMS = ["fedavg"] # ["fedavg", "fedsr", "fedavg+ga", "fedavg+omg", "feddg", "gperxan"] 
+ALGORITHMS = ["fedavg", "fedsr", "fedavg+ga", "fedavg+omg", "feddg", "gperxan"] 
 
 # Leave-One-Domain-Out Setup
-ALL_DOMAINS = ["cityscape", "gta5", "mapillary", "synthia", "bdd100"] # ["cityscape", "gta5", "mapillary", "synthia", "bdd100"]
+ALL_DOMAINS = ["cityscape", "gta5", "mapillary", "synthia", "bdd100"] 
 
-NUM_ROUNDS = 40 
+NUM_ROUNDS = 100
 NUM_EPOCHS = 5
-BATCH_SIZE = 4
+BATCH_SIZE = 16
 
 NUM_WORKERS = 4
 NUM_SAMPLE = 2000
-MAX_STEP_PER_EPCH = 200
+MAX_STEP_PER_EPCH = 100
 
 INIT_LR = 1e-3 
 MIN_LR = 2e-4
@@ -52,12 +50,11 @@ POWER = 0.9
 WEIGHT_DECAY = 0.01
 SEEDS = [2026]  
 
-# Hard fix
 NUM_CLASSES = 19
 
 CHECKPOINT_DIR = "checkpoints_fdg_css"
 RESULTS_DIR = "results_fdg_css"
-# ==========================================
+WANDB_PROJECT = "FDG_CSS"
 
 def main():
     if not ray.is_initialized():
@@ -75,7 +72,6 @@ def main():
         
         experiment_results[algo] = {}
 
-        # --- LEAVE-ONE-DOMAIN-OUT LOOP ---
         for target_domain in ALL_DOMAINS:
             source_domains = [d for d in ALL_DOMAINS if d != target_domain]
             
@@ -94,6 +90,26 @@ def main():
                 
                 checkpoint_filename = f"{algo}_target_{target_domain}_seed_{seed}.pth"
                 checkpoint_path = os.path.join(CHECKPOINT_DIR, checkpoint_filename)
+                
+                run_name = f"{algo.upper()}_{target_domain}_s{seed}"
+                wandb.init(
+                    project=WANDB_PROJECT,
+                    name=run_name,
+                    group=algo.upper(),          
+                    tags=["LODO", target_domain], 
+                    reinit=True,                
+                    config={
+                        "algorithm": algo,
+                        "target_domain": target_domain,
+                        "source_domains": source_domains,
+                        "seed": seed,
+                        "num_rounds": NUM_ROUNDS,
+                        "num_epochs": NUM_EPOCHS,
+                        "batch_size": BATCH_SIZE,
+                        "init_lr": INIT_LR,
+                        "max_steps_per_epch": MAX_STEP_PER_EPCH
+                    }
+                )
 
                 if algo == "fedavg":
                     global_backbone = SegFormerB0_Avg(num_classes=NUM_CLASSES)
@@ -117,34 +133,55 @@ def main():
                         weight_decay=WEIGHT_DECAY
                     )
                 elif algo == "fedsr":
-                    global_backbone = SegFormerB0_SR(num_classes=NUM_CLASSES)    
+                    global_backbone = SegFormerB0_SR(
+                        num_classes=NUM_CLASSES, 
+                        z_dim=256
+                    )
 
                     server = FedSR_Server(
                         num_classes=NUM_CLASSES,
                         backbone_model=global_backbone,
                         source_domains=source_domains,
+                        
                         num_rounds=NUM_ROUNDS,
                         num_epochs=NUM_EPOCHS,
                         batch_size=BATCH_SIZE,
+                        
+                        num_workers=NUM_WORKERS,
+                        num_sample=NUM_SAMPLE,
+                        max_steps_per_epch=MAX_STEP_PER_EPCH,
+                        
                         init_lr=INIT_LR,
                         min_lr=MIN_LR,
                         power=POWER,
-                        weight_decay=WEIGHT_DECAY
+                        weight_decay=WEIGHT_DECAY,
+                        
+                        z_dim=256,       
+                        alpha=0.01,    
+                        beta=0.001     
                     )
                 elif algo == "fedavg+ga":
-                    global_backbone = SegFormerB0_Avg_GA(num_classes=NUM_CLASSES)    
-
+                    global_backbone = SegFormerB0_Avg(num_classes=NUM_CLASSES)
+                    
                     server = FedAvg_GA_Server(
                         num_classes=NUM_CLASSES,
                         backbone_model=global_backbone,
                         source_domains=source_domains,
+                        
                         num_rounds=NUM_ROUNDS,
                         num_epochs=NUM_EPOCHS,
                         batch_size=BATCH_SIZE,
+                        
+                        num_workers=NUM_WORKERS,
+                        num_sample=NUM_SAMPLE,
+                        max_steps_per_epch=MAX_STEP_PER_EPCH,
+                        
                         init_lr=INIT_LR,
                         min_lr=MIN_LR,
                         power=POWER,
-                        weight_decay=WEIGHT_DECAY
+                        weight_decay=WEIGHT_DECAY,
+
+                        ga_step_size=0.05
                     )
                 elif algo == "fedavg+omg":
                     global_backbone = SegFormerB0_Avg_OMG(num_classes=NUM_CLASSES)    
@@ -153,13 +190,26 @@ def main():
                         num_classes=NUM_CLASSES,
                         backbone_model=global_backbone,
                         source_domains=source_domains,
+                        
                         num_rounds=NUM_ROUNDS,
                         num_epochs=NUM_EPOCHS,
                         batch_size=BATCH_SIZE,
+                        
+                        num_workers=NUM_WORKERS,
+                        num_sample=NUM_SAMPLE,
+                        max_steps_per_epch=MAX_STEP_PER_EPCH,
+                        
                         init_lr=INIT_LR,
                         min_lr=MIN_LR,
                         power=POWER,
-                        weight_decay=WEIGHT_DECAY
+                        weight_decay=WEIGHT_DECAY,
+
+                        global_lr=1.0,               
+                        
+                        cagrad_c=0.4,                
+                        omg_lr=0.1,                 
+                        omg_momentum=0.9,           
+                        omg_num_iter=5
                     )   
                 elif algo == "feddg":
                     global_backbone = SegFormerB0_DG(num_classes=NUM_CLASSES)    
@@ -168,13 +218,24 @@ def main():
                         num_classes=NUM_CLASSES,
                         backbone_model=global_backbone,
                         source_domains=source_domains,
+                        
                         num_rounds=NUM_ROUNDS,
                         num_epochs=NUM_EPOCHS,
                         batch_size=BATCH_SIZE,
+                        
+                        num_workers=NUM_WORKERS,
+                        num_sample=NUM_SAMPLE,
+                        max_steps_per_epch=MAX_STEP_PER_EPCH,
+                        
                         init_lr=INIT_LR,
                         min_lr=MIN_LR,
                         power=POWER,
-                        weight_decay=WEIGHT_DECAY
+                        weight_decay=WEIGHT_DECAY,
+
+                        meta_lr=0.001,               
+                        num_domains_used=2,          
+                        freq_l_min=0.0,              
+                        freq_l_max=0.1
                     )   
                 elif algo == "gperxan":
                     global_backbone = SegFormerB0_gPerXAN(num_classes=NUM_CLASSES)    
@@ -183,20 +244,28 @@ def main():
                         num_classes=NUM_CLASSES,
                         backbone_model=global_backbone,
                         source_domains=source_domains,
+                        
                         num_rounds=NUM_ROUNDS,
                         num_epochs=NUM_EPOCHS,
                         batch_size=BATCH_SIZE,
+                        
+                        num_workers=NUM_WORKERS,
+                        num_sample=NUM_SAMPLE,
+                        max_steps_per_epch=MAX_STEP_PER_EPCH,
+                        
                         init_lr=INIT_LR,
                         min_lr=MIN_LR,
                         power=POWER,
-                        weight_decay=WEIGHT_DECAY
+                        weight_decay=WEIGHT_DECAY,
+
+                        reg_weight=0.01
                     )                                                           
                 else:
                     raise NotImplementedError(f"Algorithm '{algo}' is not implemented yet.")
 
                 server.set_seed(seed)
 
-                server.train(checkpoint_path=checkpoint_path)
+                server.train(target_domain=target_domain, checkpoint_path=checkpoint_path)
 
                 print("\n[Main] Terminating Ray clients to free VRAM for evaluation...")
                 if hasattr(server, 'clients'):
@@ -214,6 +283,11 @@ def main():
                     checkpoint_path=checkpoint_path
                 )
 
+                wandb.log({
+                    "Final_Test_mIoU": miou * 100,
+                    "Final_Test_Pixel_Accuracy": pixel_acc * 100
+                })
+
                 experiment_results[algo][target_domain]["miou_list"].append(miou)
                 experiment_results[algo][target_domain]["pixel_acc_list"].append(pixel_acc)
 
@@ -225,6 +299,7 @@ def main():
                 gc.collect()
                 torch.cuda.empty_cache()
                 
+                wandb.finish()
                 print("[Main] Done. Ready for the next run.")
 
             miou_mean = np.mean(experiment_results[algo][target_domain]["miou_list"])

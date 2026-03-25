@@ -1,5 +1,6 @@
-import sys
 import os
+
+import sys
 import json 
 import numpy as np 
 import time
@@ -11,6 +12,7 @@ if project_root not in sys.path:
 
 import ray
 import torch
+import wandb
 
 from algorithms.fdgcss.feddrive.feddrive_server import FedDrive_Server
 from algorithms.fdgcss.feddrive.segformer_b0_drive import SegFormerB0_Drive
@@ -21,29 +23,30 @@ from algorithms.fdgcss.fedema.segformer_b0_ema import SegFormerB0_EMA
 from algorithms.fdgcss.our.our_server import FedCovMatch_Server
 from algorithms.fdgcss.our.segformer_b0_our import SegFormerB0_CovMatch
 
-# ==========================================
-# EXPERIMENT CONFIGURATIONS
-# ==========================================
-ALGORITHMS = ["our"] # ["feddrive", "fedema", "our"] 
+ALGORITHMS =  ["feddrive", "fedema", "our"] 
 
 # Leave-One-Domain-Out Setup
-ALL_DOMAINS = ["cityscape", "gta5", "mapillary"] # ["cityscape", "gta5", "mapillary", "synthia", "bdd100"]
+ALL_DOMAINS =  ["cityscape", "gta5", "mapillary", "synthia", "bdd100"]  
 
-NUM_ROUNDS = 10 # 40
-NUM_EPOCHS = 2 # 5
-BATCH_SIZE = 8 # 64
+NUM_ROUNDS = 100
+NUM_EPOCHS = 5
+BATCH_SIZE = 16
+
+NUM_WORKERS = 4
+NUM_SAMPLE = 2000
+MAX_STEP_PER_EPCH = 100
+
 INIT_LR = 1e-3 
 MIN_LR = 2e-4
 POWER = 0.9
 WEIGHT_DECAY = 0.01
-SEEDS = [2024, 2025, 2026]  
+SEEDS = [2026]  
 
-# Hard fix
 NUM_CLASSES = 19
 
 CHECKPOINT_DIR = "checkpoints_fdgcss"
 RESULTS_DIR = "results_fdgcss"
-# ==========================================
+WANDB_PROJECT = "FDGCSS"
 
 def main():
     if not ray.is_initialized():
@@ -61,7 +64,6 @@ def main():
         
         experiment_results[algo] = {}
 
-        # --- LEAVE-ONE-DOMAIN-OUT LOOP ---
         for target_domain in ALL_DOMAINS:
             source_domains = [d for d in ALL_DOMAINS if d != target_domain]
             
@@ -80,10 +82,29 @@ def main():
                 
                 checkpoint_filename = f"{algo}_target_{target_domain}_seed_{seed}.pth"
                 checkpoint_path = os.path.join(CHECKPOINT_DIR, checkpoint_filename)
+                
+                run_name = f"{algo.upper()}_{target_domain}_s{seed}"
+                wandb.init(
+                    project=WANDB_PROJECT,
+                    name=run_name,
+                    group=algo.upper(),          
+                    tags=["LODO", target_domain], 
+                    reinit=True,                
+                    config={
+                        "algorithm": algo,
+                        "target_domain": target_domain,
+                        "source_domains": source_domains,
+                        "seed": seed,
+                        "num_rounds": NUM_ROUNDS,
+                        "num_epochs": NUM_EPOCHS,
+                        "batch_size": BATCH_SIZE,
+                        "init_lr": INIT_LR,
+                        "max_steps_per_epch": MAX_STEP_PER_EPCH
+                    }
+                )
 
                 if algo == "feddrive":
                     global_backbone = SegFormerB0_Drive(num_classes=NUM_CLASSES)
-                    
                     server = FedDrive_Server(
                         num_classes=NUM_CLASSES,
                         backbone_model=global_backbone,
@@ -91,14 +112,17 @@ def main():
                         num_rounds=NUM_ROUNDS,
                         num_epochs=NUM_EPOCHS,
                         batch_size=BATCH_SIZE,
+                        num_workers=NUM_WORKERS,
+                        num_sample=NUM_SAMPLE,
+                        max_steps_per_epch=MAX_STEP_PER_EPCH,
                         init_lr=INIT_LR,
                         min_lr=MIN_LR,
                         power=POWER,
-                        weight_decay=WEIGHT_DECAY
+                        weight_decay=WEIGHT_DECAY,
+                        hnm_perc=0.25
                     )
                 elif algo == "fedema":
                     global_backbone = SegFormerB0_EMA(num_classes=NUM_CLASSES)    
-
                     server = FedEMA_Server(
                         num_classes=NUM_CLASSES,
                         backbone_model=global_backbone,
@@ -106,14 +130,18 @@ def main():
                         num_rounds=NUM_ROUNDS,
                         num_epochs=NUM_EPOCHS,
                         batch_size=BATCH_SIZE,
+                        num_workers=NUM_WORKERS,
+                        num_sample=NUM_SAMPLE,
+                        max_steps_per_epch=MAX_STEP_PER_EPCH,
                         init_lr=INIT_LR,
                         min_lr=MIN_LR,
                         power=POWER,
-                        weight_decay=WEIGHT_DECAY
+                        weight_decay=WEIGHT_DECAY,
+                        beta=0.9,
+                        lambda_ent=0.1
                     )
                 elif algo == "our":
                     global_backbone = SegFormerB0_CovMatch(num_classes=NUM_CLASSES)    
-
                     server = FedCovMatch_Server(
                         num_classes=NUM_CLASSES,
                         backbone_model=global_backbone,
@@ -121,17 +149,24 @@ def main():
                         num_rounds=NUM_ROUNDS,
                         num_epochs=NUM_EPOCHS,
                         batch_size=BATCH_SIZE,
+                        num_workers=NUM_WORKERS,
+                        num_sample=NUM_SAMPLE,
+                        max_steps_per_epch=MAX_STEP_PER_EPCH,
                         init_lr=INIT_LR,
                         min_lr=MIN_LR,
                         power=POWER,
-                        weight_decay=WEIGHT_DECAY
+                        weight_decay=WEIGHT_DECAY,
+                        
+                        lam_cov=1.0,
+                        lam_syn=0.5,
+                        lam_cons=0.3,
                     )
                 else:
                     raise NotImplementedError(f"Algorithm '{algo}' is not implemented yet.")
 
                 server.set_seed(seed)
 
-                server.train(checkpoint_path=checkpoint_path)
+                server.train(target_domain=target_domain, checkpoint_path=checkpoint_path)
 
                 print("\n[Main] Terminating Ray clients to free VRAM for evaluation...")
                 if hasattr(server, 'clients'):
@@ -149,6 +184,11 @@ def main():
                     checkpoint_path=checkpoint_path
                 )
 
+                wandb.log({
+                    "Final_Test_mIoU": miou * 100,
+                    "Final_Test_Pixel_Accuracy": pixel_acc * 100
+                })
+
                 experiment_results[algo][target_domain]["miou_list"].append(miou)
                 experiment_results[algo][target_domain]["pixel_acc_list"].append(pixel_acc)
 
@@ -160,6 +200,7 @@ def main():
                 gc.collect()
                 torch.cuda.empty_cache()
                 
+                wandb.finish()
                 print("[Main] Done. Ready for the next run.")
 
             miou_mean = np.mean(experiment_results[algo][target_domain]["miou_list"])

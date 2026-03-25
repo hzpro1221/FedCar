@@ -15,9 +15,6 @@ class AugmentedSegmentationDataset(Dataset):
         image_transform=None, 
         mask_transform=None
     ):
-        """
-        PyTorch Dataset to load the ControlNet augmented images, original images, and labels.
-        """
         self.root_dir = root_dir
         self.image_size = image_size
         self.image_transform = image_transform
@@ -106,10 +103,6 @@ def get_augmented_dataloader(
     shuffle=True, 
     num_workers=4
 ):
-    """
-    Helper function to initialize the Dataset and return a PyTorch DataLoader.
-    """
-    
     dataset = AugmentedSegmentationDataset(
         root_dir=root_dir,
         dataset_names=dataset_names,
