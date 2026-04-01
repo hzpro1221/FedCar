@@ -7,174 +7,135 @@ if project_root not in sys.path:
 
 import torch
 import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader
 import torch.nn.functional as F
-import numpy as np
-import random
-import copy
 import ray
-import time 
-
-from algorithms.dataset_pytorch import BDD100KDataset, CityscapesDataset, GTA5Dataset, MapillaryDataset, SynthiaDataset
+from algorithms.fdg_css.fedavg.fedavg_client import Base_FedAvg_Client
 
 @ray.remote(num_gpus=0.2)
-class FedSR_Client:
+class FedSR_Client(Base_FedAvg_Client):
     def __init__(
-        self,
-        data,
-        client_id,
-        local_model,
-
-        num_sample,   
-        num_epoch,
-        batch_size,
-        num_workers,  
-        num_classes,
-
-        init_lr,
-        min_lr,
-        power,
-        weight_decay,
-        max_steps_per_epch,
-
-        z_dim, 
-        alpha, 
-        beta
+        self, 
+        num_classes, 
+        z_dim=128, 
+        alpha=0.01, 
+        beta=0.001, 
+        feat_dim=128,       
+        hook_layer_name='bga', 
+        **kwargs
     ):
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.client_id = client_id
-        self.data = data
-        
-        self.local_model = local_model.to(self.device)
-
-        self.num_sample = num_sample
-        self.num_epoch = num_epoch
-        self.batch_size = batch_size
-        self.num_workers = num_workers
+        super().__init__(**kwargs)
         self.num_classes = num_classes
-
-        self.init_lr = init_lr
-        self.min_lr = min_lr
-        self.power = power
-        self.weight_decay = weight_decay
-        self.max_steps_per_epch = max_steps_per_epch
-
+        self.z_dim = z_dim
         self.alpha = alpha
         self.beta = beta
-        self.z_dim = z_dim
+        self.feat_dim = feat_dim
+        self.hook_layer_name = hook_layer_name
 
-        if self.data == 'cityscape':
-            self.dataset = CityscapesDataset(
-                images_dir="dataset/cityscape/leftImg8bit/train",
-                labels_dir="dataset/cityscape/gtFine/train",
-                num_sample=self.num_sample
+        def build_prob_bottleneck(in_dim, out_dim):
+            mid_dim = max(in_dim // 2, out_dim) 
+            return nn.Sequential(
+                nn.Conv2d(in_dim, mid_dim, kernel_size=3, padding=1, bias=False),
+                nn.BatchNorm2d(mid_dim),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(mid_dim, out_dim, kernel_size=1)
             )
-        elif self.data == "bdd100":
-            self.dataset = BDD100KDataset(
-                images_dir="dataset/bdd100/10k/train",
-                labels_dir="dataset/bdd100/labels/train",
-                num_sample=self.num_sample
-            )
-        elif self.data == "gta5":
-            self.dataset = GTA5Dataset(
-                list_of_paths=[
-                    "dataset/gta5/gta5_part1",
-                    "dataset/gta5/gta5_part2",
-                    "dataset/gta5/gta5_part3",
-                    "dataset/gta5/gta5_part4",
-                    "dataset/gta5/gta5_part5",
-                    "dataset/gta5/gta5_part6",
-                    "dataset/gta5/gta5_part7",
-                ],
-                num_sample=self.num_sample
-            )
-        elif self.data == "mapillary":
-            self.dataset = MapillaryDataset(
-                root_dir="dataset/mapillary/training",
-                num_sample=self.num_sample
-            ) 
-        elif self.data == "synthia":
-            self.dataset = SynthiaDataset(
-                root_dir="dataset/synthia/RAND_CITYSCAPES",
-                num_sample=self.num_sample
-            )
-        else:
-            raise ValueError(f"Unknown dataset domain: {self.data}")
-        
-        self.train_dataloader = DataLoader(
-            self.dataset,
-            batch_size=self.batch_size,
-            shuffle=True,
-            num_workers=self.num_workers,
-            pin_memory=True
-        )
-        self.total_samples = len(self.dataset)
-        
-        self.criterion = nn.CrossEntropyLoss(ignore_index=255)
 
-    def train(self, global_parameters):
+        self.mu_net = build_prob_bottleneck(self.feat_dim, self.z_dim).to(self.device)
+        self.logvar_net = build_prob_bottleneck(self.feat_dim, self.z_dim).to(self.device)
+
+        self.r_mu = nn.Parameter(torch.randn(self.num_classes, self.z_dim).to(self.device))
+        self.r_logvar = nn.Parameter(torch.zeros(self.num_classes, self.z_dim).to(self.device))
+
+    def get_extra_parameters(self):
+        return list(self.mu_net.parameters()) + \
+               list(self.logvar_net.parameters()) + \
+               [self.r_mu, self.r_logvar]
+
+    def train(self, global_parameters, data_domain, client_id):
+        self.load_dataset(data_domain)
+        
         self.local_model.load_state_dict(global_parameters)
         self.local_model.to(self.device)
         self.local_model.train()
         
-        self.optimizer = optim.AdamW(
-            self.local_model.parameters(), 
-            lr=self.init_lr, 
-            weight_decay=self.weight_decay
-        )
-
-        self.scheduler = optim.lr_scheduler.PolynomialLR(
+        all_params = list(self.local_model.parameters()) + self.get_extra_parameters()
+        self.optimizer = torch.optim.AdamW(all_params, lr=self.init_lr, weight_decay=self.weight_decay)
+        
+        self.scheduler = torch.optim.lr_scheduler.PolynomialLR(
             self.optimizer, 
             total_iters=self.num_epoch * self.max_steps_per_epch, 
             power=self.power
         )
+        
+        self.current_feat_head = None 
+
+        def hook_fn(module, input, output):
+            if isinstance(output, (list, tuple)):
+                self.current_feat_head = output[-1]
+            else:
+                self.current_feat_head = output
+
+        target_layer = dict(self.local_model.named_modules()).get(self.hook_layer_name, None)
+        if target_layer is None:
+            raise ValueError(f"Not found layer '{self.hook_layer_name}' in {self.local_model.__class__.__name__}")
+        
+        hook_handle = target_layer.register_forward_hook(hook_fn)
 
         for epoch in range(self.num_epoch):
             for step, (images, masks) in enumerate(self.train_dataloader):
-                if step >= self.max_steps_per_epch: 
-                    break
+                if step >= self.max_steps_per_epch: break
                 
                 images, masks = images.to(self.device), masks.to(self.device)
                 self.optimizer.zero_grad()
                 
-                logits, z, z_mu, z_sigma = self.local_model(
-                    images, 
-                    return_dist=True
-                )
+                outputs = self.local_model(images)
                 
-                loss = self.criterion(logits, masks)
+                logits = outputs[0] if isinstance(outputs, (tuple, list)) else outputs
                 
-                small_masks = F.interpolate(
-                    masks.unsqueeze(1).float(), 
-                    size=z.shape[2:], 
-                    mode='nearest'
-                ).squeeze(1).long()
+                feat_head = self.current_feat_head
+                
+                mu = self.mu_net(feat_head)
+                logvar = self.logvar_net(feat_head)
+                
+                std = torch.exp(0.5 * logvar)
+                eps = torch.randn_like(std)
+                z = mu + eps * std
+                
+                loss_ce = self.criterion(logits, masks)
+                
+                with torch.no_grad():
+                    small_masks = F.interpolate(masks.unsqueeze(1).float(), size=z.shape[2:], mode='nearest').squeeze(1).long()
+                    valid_mask = (small_masks != 255)
+                
+                if valid_mask.any():
+                    z_v = z.permute(0, 2, 3, 1)[valid_mask]      
+                    mu_p = mu.permute(0, 2, 3, 1)[valid_mask]    
+                    logvar_p = logvar.permute(0, 2, 3, 1)[valid_mask]
+                    y_v = small_masks[valid_mask]
 
-                valid_mask = (small_masks != 255) 
-                
-                z_valid = z.permute(0, 2, 3, 1)[valid_mask]
-                z_mu_valid = z_mu.permute(0, 2, 3, 1)[valid_mask]
-                z_sigma_valid = z_sigma.permute(0, 2, 3, 1)[valid_mask]
-                y_valid = small_masks[valid_mask]
-                
-                loss_l2r = z_valid.norm(dim=1).mean()
-                
-                r_sigma_softplus = F.softplus(self.local_model.r_sigma)
-                r_mu_batch = self.local_model.r_mu[y_valid]       
-                r_sigma_batch = r_sigma_softplus[y_valid]
-                
-                loss_cmi = torch.log(r_sigma_batch) - torch.log(z_sigma_valid) + \
-                           (z_sigma_valid**2 + (z_mu_valid - r_mu_batch)**2) / (2 * r_sigma_batch**2) - 0.5
-                loss_cmi = loss_cmi.sum(dim=1).mean()
+                    # L2R Loss
+                    loss_l2r = (z_v ** 2).sum(dim=1).mean()
 
-                total_loss = loss + self.alpha * loss_l2r + self.beta * loss_cmi
+                    # CMI Loss
+                    mu_r = self.r_mu[y_v]
+                    logvar_r = self.r_logvar[y_v]
+                    var_p = torch.exp(logvar_p)
+                    var_r = torch.exp(logvar_r)
+                    
+                    loss_cmi = 0.5 * (logvar_r - logvar_p + (var_p + (mu_p - mu_r)**2) / var_r - 1)
+                    loss_cmi = loss_cmi.sum(dim=1).mean()
+                else:
+                    loss_l2r, loss_cmi = 0.0, 0.0
+
+                total_loss = loss_ce + self.alpha * loss_l2r + self.beta * loss_cmi
                 
                 total_loss.backward()
                 self.optimizer.step()
-                
-            self.scheduler.step()
+                self.scheduler.step()
+
+        hook_handle.remove()
 
         local_weights = {k: v.cpu() for k, v in self.local_model.state_dict().items()}
-
-        return local_weights, self.total_samples
+        num_samples_trained = min(self.max_steps_per_epch * self.batch_size, self.total_samples)
+        
+        return local_weights, num_samples_trained, client_id

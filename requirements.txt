@@ -17,3 +17,4 @@ xformers
 scikit-learn 
 matplotlib
 wandb
+pytorch-metric-learning

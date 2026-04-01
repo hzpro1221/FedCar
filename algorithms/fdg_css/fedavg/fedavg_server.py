@@ -12,42 +12,47 @@ import copy
 from tqdm import tqdm
 from torch.utils.data import DataLoader
 import ray
+from ray.util.actor_pool import ActorPool
 import wandb 
 
 from algorithms.dataset_pytorch import BDD100KDataset, CityscapesDataset, GTA5Dataset, MapillaryDataset, SynthiaDataset
 
 from .fedavg_client import FedAvg_Client
-from .segformer_b0_avg import SegFormerB0_Avg
+
+from models.bisenet_v2 import BiSeNetV2
+from models.topformer import TopformerSeg
 
 class FedAvg_Server:
     def __init__(
         self, 
         num_classes,
-        backbone_model, 
+        model_name,           
         source_domains,
         num_rounds, 
         num_epochs, 
         batch_size,
-
         num_workers,
+        max_concurrent_clients, 
         num_sample,
         max_steps_per_epch,
-
         init_lr,
         min_lr,
         power,
-        weight_decay
+        weight_decay,
+        **kwargs              
     ):
         print("\n" + "="*50)
-        print("[Server] Initializing FedAvg Server...")
+        print(f"[Server] Initializing {self.__class__.__name__}...")
+        
         self.num_classes = num_classes
-        self.backbone_model = backbone_model
+        self.model_name = model_name.lower()
         self.source_domains = source_domains
+        
         self.num_rounds = num_rounds
         self.num_epochs = num_epochs
         self.batch_size = batch_size
-        
         self.num_workers = num_workers
+        self.max_concurrent_clients = max_concurrent_clients
         self.num_sample = num_sample
         self.max_steps_per_epch = max_steps_per_epch
 
@@ -58,19 +63,30 @@ class FedAvg_Server:
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"[Server] Global device set to: {self.device}")
-        print(f"[Server] Source domains registered: {self.source_domains}")
-        print(f"[Server] Communication Rounds: {self.num_rounds} | Local Epochs: {self.num_epochs}")
+        
+        self.backbone_model = self._build_model()
+        
+        self.workers = self._init_worker_pool(**kwargs)
+        self.actor_pool = ActorPool(self.workers)
+        
+        print(f"[Server] Successfully initialized pool with {len(self.workers)} reusable remote workers.")
+        print("="*50 + "\n")
+    
+    def _build_model(self):
+        if self.model_name == 'bisenetv2':
+            return BiSeNetV2(n_classes=self.num_classes)
+        elif self.model_name == 'topformer':
+            return TopformerSeg(num_classes=self.num_classes) 
+        else:
+            raise ValueError(f"Unknown model name: {self.model_name}")
 
-        self.clients = []
-        print("[Server] Initializing remote clients via Ray...")
-        for i, domain in enumerate(self.source_domains):
-            self.clients.append(
+    def _init_worker_pool(self, **kwargs):
+        print(f"[Server] Initializing {self.max_concurrent_clients} base workers via Ray...")
+        workers = []
+        for _ in range(self.max_concurrent_clients):
+            workers.append(
                 FedAvg_Client.remote(
-                    data=domain,
-                    client_id=i,
-                    local_model=SegFormerB0_Avg(
-                        num_classes=self.num_classes
-                    ),
+                    local_model=copy.deepcopy(self.backbone_model),
                     num_sample=self.num_sample,
                     num_epoch=self.num_epochs,
                     batch_size=self.batch_size,
@@ -79,38 +95,33 @@ class FedAvg_Server:
                     init_lr=self.init_lr,
                     min_lr=self.min_lr,
                     power=self.power,
-                    weight_decay=self.weight_decay
+                    weight_decay=self.weight_decay,
+                    **kwargs
                 )
             )
-        print(f"[Server] Successfully initialized {len(self.clients)} remote clients.")
-        print("="*50 + "\n")
-    
+        return workers
+
     def set_seed(self, seed): 
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
         torch.cuda.manual_seed(seed)
+        torch.backends.cudnn.deterministic = True
         print(f"[Server] Global seed set to {seed}.")
     
     def aggregate(self, local_weights_list, total_samples_list):
-        print("[Server] Starting FedAvg aggregation...")
         total_samples = sum(total_samples_list)
-        print(f"[Server] Total samples across all clients: {total_samples}")
-        
-        avg_weights = copy.deepcopy(local_weights_list[0])
-        for key in avg_weights.keys():
-            avg_weights[key] = torch.zeros_like(avg_weights[key])
+        avg_weights = {k: torch.zeros_like(v) for k, v in local_weights_list[0].items()}
 
-        for i in range(len(local_weights_list)):
-            local_w = local_weights_list[i]
-            n_k = total_samples_list[i]
+        for local_w, n_k in zip(local_weights_list, total_samples_list):
             weight_factor = n_k / total_samples
-
             for key in avg_weights.keys():
-                avg_weights[key] += (local_w[key] * weight_factor).to(avg_weights[key].dtype)
+                avg_weights[key] += (local_w[key].float() * weight_factor).to(avg_weights[key].dtype)
         
-        print("[Server] Aggregation complete.")
         return avg_weights
+
+    def update_global_model(self, aggregated_weights):
+        self.backbone_model.load_state_dict(aggregated_weights)
 
     def train(self, target_domain, checkpoint_path):
         print(f"\n[Server] Commencing Federated Learning process for {self.num_rounds} rounds.")
@@ -119,31 +130,37 @@ class FedAvg_Server:
 
         for round_idx in round_pbar:
             print(f"\n--- [Server] Starting Round {round_idx + 1}/{self.num_rounds} ---")
-            print("[Server] Broadcasting global weights to all clients...")
-            job_ids = [
-                client.train.remote(
-                    global_parameters=global_weights
-                ) 
-                for i, client in enumerate(self.clients)
-            ]
+            
+            tasks = []
+            for i, domain in enumerate(self.source_domains):
+                tasks.append({
+                    "global_weights": global_weights,
+                    "data_domain": domain,
+                    "client_id": i
+                })
+            
+            print(f"[Server] Pushing {len(tasks)} tasks to ActorPool ({self.max_concurrent_clients} workers)...")
+            
+            results = list(self.actor_pool.map(
+                lambda actor, task: actor.train.remote(
+                    global_parameters=task["global_weights"],
+                    data_domain=task["data_domain"],
+                    client_id=task["client_id"]
+                ),
+                tasks
+            ))
 
-            print(f"[Server] Waiting for {len(self.clients)} clients to finish local training...")
-            results = ray.get(job_ids)
-            print(f"[Server] Received local weights from all clients.")
+            print(f"[Server] Received local weights from all domains.")
             
             local_weights_list = [r[0] for r in results]
             total_samples_list = [r[1] for r in results]
 
-            global_weights = self.aggregate(
-                local_weights_list=local_weights_list, 
-                total_samples_list=total_samples_list
-            )
-
-            print("[Server] Updating global backbone model with aggregated weights.")
-            self.backbone_model.load_state_dict(global_weights)
+            aggregated_weights = self.aggregate(local_weights_list, total_samples_list)
+            self.update_global_model(aggregated_weights)
+            global_weights = self.backbone_model.state_dict()
             
             print(f"[Server] Evaluating Round {round_idx + 1}...")
-            miou, pixel_acc, _ = self.evaluate(target_domain=target_domain, checkpoint_path=None)
+            miou, pixel_acc, _ = self.evaluate(target_domain=target_domain)
             
             wandb.log({
                 "Round": round_idx + 1,
@@ -151,12 +168,12 @@ class FedAvg_Server:
                 "Round_Test_Pixel_Accuracy": pixel_acc * 100
             })
 
-            round_pbar.set_description(f"Round {round_idx + 1} | mIoU: {miou*100:.2f}%")
+            round_pbar.set_postfix(mIoU=f"{miou * 100:.2f}%")
 
         print(f"\n[Server] Training complete. Saving global model to {checkpoint_path}")
         torch.save(self.backbone_model.state_dict(), checkpoint_path)
         return self.backbone_model
-    
+
     def evaluate(self, target_domain, checkpoint_path=None):
         print("\n" + "="*50)
         print(f"[Server] Starting evaluation on Target Domain: {target_domain}")
@@ -205,7 +222,9 @@ class FedAvg_Server:
                 masks = masks.to(self.device)
 
                 outputs = self.backbone_model(images) 
-                preds = torch.argmax(outputs, dim=1) 
+
+                logits = outputs[0] if isinstance(outputs, (tuple, list)) else outputs
+                preds = torch.argmax(logits, dim=1)
 
                 mask_valid = (masks != 255)
                 
