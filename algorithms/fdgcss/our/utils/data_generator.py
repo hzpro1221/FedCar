@@ -172,7 +172,7 @@ if __name__ == "__main__":
     MIN_AREA=0
     NUM_INFERENCE_STEPS = 40
     CONTROLNET_CONDITIONING_SCALE = 1.2
-    MAX_SAMPLES = 8
+    MAX_SAMPLES = 2000
 
     try:
         from algorithms.dataset_pytorch import (

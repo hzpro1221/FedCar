@@ -63,7 +63,6 @@ class FedOMG_Server(FedAvg_Server):
         g_ref = torch.matmul(p.t(), grads).squeeze(0) 
         norm_g_ref = torch.norm(g_ref) + 1e-8
         
-        # Tiền tính toán một vài hằng số để tối ưu
         GG_norm_p = torch.matmul(GG_norm, p)
         g_ref_norm_sq = torch.matmul(p.t(), GG_norm_p).squeeze()
         
@@ -71,22 +70,18 @@ class FedOMG_Server(FedAvg_Server):
         w_opt = torch.optim.SGD([w], lr=self.omg_lr, momentum=self.omg_momentum)
         
         best_loss = np.inf
-        w_best = w.clone().detach() # Khởi tạo an toàn hơn
+        w_best = w.clone().detach()
         
         for i in range(self.omg_num_iter + 1):
             w_opt.zero_grad()
 
             Gamma = torch.softmax(w, dim=0)
 
-            # Tính các đại lượng cho loss
             gamma_norm_sq = torch.matmul(Gamma.t(), torch.matmul(GG_norm, Gamma)).squeeze()
             dot_product_gamma_ref = torch.matmul(Gamma.t(), GG_norm_p).squeeze()
             
-            # Loss chính: ||Gamma*G - p*G||^2  (Dạng mở triển)
-            # Thay vì tính loằng ngoằng, ta gom lại:
             distance_sq = gamma_norm_sq - 2 * dot_product_gamma_ref + g_ref_norm_sq
             
-            # Đảm bảo loss không bao giờ bị âm do sai số float
             distance_sq = torch.clamp(distance_sq, min=0.0)
             
             loss = distance_sq
@@ -101,7 +96,6 @@ class FedOMG_Server(FedAvg_Server):
 
         Gamma_opt = torch.softmax(w_best.detach(), dim=0)
         
-        # --- CẬP NHẬT CÁCH TÍNH G_FINAL CHO ĐÚNG BẢN CHẤT OMG ---
         g_Gamma = torch.matmul(Gamma_opt.t(), grads).squeeze(0)
         norm_g_Gamma = torch.norm(g_Gamma) + 1e-8
         

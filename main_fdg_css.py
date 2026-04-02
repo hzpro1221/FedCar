@@ -26,23 +26,25 @@ from algorithms.fdgcss.our.our_server import FedCovMatch_Server
 
 wandb.login(key="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")
 
-# "feddg_elcfs" -> meta-learning, run later
-
-ALGORITHMS =  ["our"]  # ["fedavg", "fedsr", "feddg_ga", "fedomg", "gperxan", "sinobn_lab", "fedema", "our"]
+ALGORITHMS =  ["our"]  # ["fedavg", "fedsr", "feddg_ga", "feddg_elcfs", "fedomg", "gperxan", "sinobn_lab", "fedema", "our"]
 MODEL_NAME = "topformer"  # "bisenetv2" or "topformer"
+
+# ["fedavg", "fedsr", "feddg_ga", "feddg_elcfs", "fedomg", "gperxan", "sinobn_lab", "fedema", "our"]
+# currently run: "fedavg", "fedsr", "feddg_ga", "feddg_elcfs", "fedema"
+ALGORITHMS =  ["fedema"]
 
 # Leave-One-Domain-Out Setup
 ALL_DOMAINS = ["cityscape", "gta5", "mapillary", "synthia", "bdd100"] 
 
-NUM_ROUNDS = 120 
-NUM_EPOCHS = 5
-BATCH_SIZE = 16
+NUM_ROUNDS = 100
+NUM_EPOCHS = 3
+BATCH_SIZE = 8
 
 NUM_WORKERS = 4
 MAX_CONCURRENT_CLIENTS = 1
 
 NUM_SAMPLE = 2000
-MAX_STEP_PER_EPCH = 100
+MAX_STEP_PER_EPCH = 20
 
 INIT_LR = 1e-3 
 MIN_LR = 2e-4

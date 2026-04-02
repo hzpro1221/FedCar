@@ -24,15 +24,15 @@ PROJ_DIMS = [256, 128, 64, 32, 16, 8]
 # Leave-One-Domain-Out Setup
 ALL_DOMAINS = ["cityscape", "gta5", "mapillary", "synthia", "bdd100"] 
 
-NUM_ROUNDS = 120 
-NUM_EPOCHS = 5
-BATCH_SIZE = 16
+NUM_ROUNDS = 100
+NUM_EPOCHS = 3
+BATCH_SIZE = 8
 
 NUM_WORKERS = 4
 MAX_CONCURRENT_CLIENTS = 1
 
 NUM_SAMPLE = 2000
-MAX_STEP_PER_EPCH = 100
+MAX_STEP_PER_EPCH = 20
 
 INIT_LR = 1e-3 
 MIN_LR = 2e-4

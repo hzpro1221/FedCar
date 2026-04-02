@@ -98,14 +98,15 @@ class FedDG_GA_Server(FedAvg_Server):
         return avg_weights
 
     def train(self, target_domain, checkpoint_path):
-        print(f"\n[Server] Commencing FedDG-GA with State Persistence.")
+        print(f"\n[Server] Commencing FedDG-GA with State Persistence for {self.num_rounds} rounds.")
         global_weights = self.backbone_model.state_dict()
-        round_pbar = tqdm(range(self.num_rounds), desc="Round")
+        round_pbar = tqdm(range(self.num_rounds), desc="Round", position=0)
 
         for round_idx in round_pbar:
             self.current_round = round_idx
-            tasks = []
+            print(f"\n--- [Server] Starting Round {round_idx + 1}/{self.num_rounds} ---")
             
+            tasks = []
             for i, domain in enumerate(self.source_domains):
                 tasks.append({
                     "global_weights": global_weights,
@@ -113,6 +114,8 @@ class FedDG_GA_Server(FedAvg_Server):
                     "data_domain": domain,
                     "client_id": i
                 })
+            
+            print(f"[Server] Pushing {len(tasks)} tasks to ActorPool ({self.max_concurrent_clients} workers)...")
             
             results = list(self.actor_pool.map(
                 lambda actor, task: actor.train.remote(
@@ -124,6 +127,8 @@ class FedDG_GA_Server(FedAvg_Server):
                 tasks
             ))
 
+            print(f"[Server] Received local weights and generalization gaps from all domains.")
+
             local_weights_list = [r[0] for r in results]
             gaps_list = [r[1] for r in results]
             
@@ -134,9 +139,17 @@ class FedDG_GA_Server(FedAvg_Server):
             self.update_global_model(aggregated_weights)
             global_weights = self.backbone_model.state_dict()
             
-            miou, _, _ = self.evaluate(target_domain=target_domain)
-            wandb.log({"Round": round_idx + 1, "mIoU": miou * 100})
+            print(f"[Server] Evaluating Round {round_idx + 1}...")
+            miou, pixel_acc, _ = self.evaluate(target_domain=target_domain)
+            
+            wandb.log({
+                "Round": round_idx + 1,
+                "Round_Test_mIoU": miou * 100,
+                "Round_Test_Pixel_Accuracy": pixel_acc * 100
+            })
+            
             round_pbar.set_postfix(mIoU=f"{miou * 100:.2f}%")
 
+        print(f"\n[Server] Training complete. Saving global model to {checkpoint_path}")
         torch.save(self.backbone_model.state_dict(), checkpoint_path)
         return self.backbone_model
