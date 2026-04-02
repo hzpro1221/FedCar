@@ -26,12 +26,11 @@ from algorithms.fdgcss.our.our_server import FedCovMatch_Server
 
 wandb.login(key="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")
 
-ALGORITHMS =  ["our"]  # ["fedavg", "fedsr", "feddg_ga", "feddg_elcfs", "fedomg", "gperxan", "sinobn_lab", "fedema", "our"]
-MODEL_NAME = "topformer"  # "bisenetv2" or "topformer"
 
 # ["fedavg", "fedsr", "feddg_ga", "feddg_elcfs", "fedomg", "gperxan", "sinobn_lab", "fedema", "our"]
-# currently run: "fedavg", "fedsr", "feddg_ga", "feddg_elcfs", "fedema"
 ALGORITHMS =  ["fedema"]
+
+MODEL_NAME = "topformer"  # "bisenetv2" or "topformer"
 
 # Leave-One-Domain-Out Setup
 ALL_DOMAINS = ["cityscape", "gta5", "mapillary", "synthia", "bdd100"] 
