@@ -402,9 +402,19 @@ class BiSeNetV2(nn.Module):
                 add_param_to_list(child, wd_params, nowd_params)
         return wd_params, nowd_params, lr_mul_wd_params, lr_mul_nowd_params
 
-
+def print_component_params(model, model_name):
+    print(f"--- {model_name} ---")
+    for name, child in model.named_children():
+        params = sum(p.numel() for p in child.parameters()) / 1e6
+        if params > 0:
+            print(f"{name}: {params:.3f} M")
+    print(f"Total: {sum(p.numel() for p in model.parameters()) / 1e6:.3f} M\n")
 
 if __name__ == "__main__":
+    model_bise = BiSeNetV2(n_classes=19)
+    print_component_params(model_bise, "BiSeNet-V2")
+
+# if __name__ == "__main__":
     #  x = torch.randn(16, 3, 1024, 2048)
     #  detail = DetailBranch()
     #  feat = detail(x)
@@ -446,11 +456,11 @@ if __name__ == "__main__":
     #  feat = segment(x)[0]
     #  print(feat.size())
     #
-    x = torch.randn(16, 3, 1024, 2048)
-    model = BiSeNetV2(n_classes=19)
-    outs = model(x)
-    for out in outs:
-        print(out.size())
+    # x = torch.randn(16, 3, 1024, 2048)
+    # model = BiSeNetV2(n_classes=19)
+    # outs = model(x)
+    # for out in outs:
+    #     print(out.size())
     #  print(logits.size())
 
     #  for name, param in model.named_parameters():

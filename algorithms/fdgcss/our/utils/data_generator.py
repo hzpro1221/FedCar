@@ -24,6 +24,7 @@ class DatasetAugmenter:
         num_inference_steps,
         controlnet_conditioning_scale,
         max_samples=None,
+        start_indices=None, 
         base_model="runwayml/stable-diffusion-v1-5", 
         controlnet_model="lllyasviel/sd-controlnet-canny",
     ):
@@ -35,6 +36,8 @@ class DatasetAugmenter:
         self.num_inference_steps = num_inference_steps
         self.controlnet_conditioning_scale = controlnet_conditioning_scale
         self.max_samples = max_samples
+        
+        self.start_indices = start_indices if start_indices is not None else {} 
 
         print("Creating folder to save data...")        
         for ds_name in self.dataset_names:
@@ -130,7 +133,12 @@ class DatasetAugmenter:
             
             total_samples = len(dataset) if self.max_samples is None else min(self.max_samples, len(dataset))
             
-            for idx in tqdm(range(total_samples), desc=f"Augmenting {dataset_name}"):
+            start = self.start_indices.get(dataset_name, 0)
+            if start >= total_samples:
+                print(f"Start index {start} lớn hơn tổng số sample ({total_samples}). Bỏ qua dataset này.")
+                continue
+
+            for idx in tqdm(range(start, total_samples), desc=f"Augmenting {dataset_name}"):
                 image_tensor, mask_tensor = dataset[idx]
                 
                 img_np = (image_tensor.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
@@ -172,7 +180,14 @@ if __name__ == "__main__":
     MIN_AREA=0
     NUM_INFERENCE_STEPS = 40
     CONTROLNET_CONDITIONING_SCALE = 1.2
+    
     MAX_SAMPLES = 2000
+    
+    START_INDICES = {
+        "GTA5": 1821,
+        "Mapillary": 0,
+        "Synthia": 0
+    }
 
     try:
         from algorithms.dataset_pytorch import (
@@ -187,24 +202,24 @@ if __name__ == "__main__":
         sys.exit(1)
 
     datasets_config = [
-        {
-            "name": "Cityscapes",
-            "class_ref": CityscapesDataset,
-            "kwargs": {
-                "images_dir": "dataset/cityscape/leftImg8bit/train",
-                "labels_dir": "dataset/cityscape/gtFine/train",
-                "image_size": IMAGE_SIZE
-            }
-        },
-        {
-            "name": "BDD100K",
-            "class_ref": BDD100KDataset,
-            "kwargs": {
-                "images_dir": "dataset/bdd100/10k/train",
-                "labels_dir": "dataset/bdd100/labels/train",
-                "image_size": IMAGE_SIZE
-            }
-        },
+        # {
+        #     "name": "Cityscapes",
+        #     "class_ref": CityscapesDataset,
+        #     "kwargs": {
+        #         "images_dir": "dataset/cityscape/leftImg8bit/train",
+        #         "labels_dir": "dataset/cityscape/gtFine/train",
+        #         "image_size": IMAGE_SIZE
+        #     }
+        # },
+        # {
+        #     "name": "BDD100K",
+        #     "class_ref": BDD100KDataset,
+        #     "kwargs": {
+        #         "images_dir": "dataset/bdd100/10k/train",
+        #         "labels_dir": "dataset/bdd100/labels/train",
+        #         "image_size": IMAGE_SIZE
+        #     }
+        # },
         {
             "name": "GTA5",
             "class_ref": GTA5Dataset,
@@ -258,6 +273,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     print("\nInitializing DatasetAugmenter...")
+    
     augmenter = DatasetAugmenter(
         datasets=loaded_datasets,
         dataset_names=dataset_names, 
@@ -266,7 +282,8 @@ if __name__ == "__main__":
         min_area=MIN_AREA,                    
         num_inference_steps=NUM_INFERENCE_STEPS,            
         controlnet_conditioning_scale=CONTROLNET_CONDITIONING_SCALE,  
-        max_samples=MAX_SAMPLES
+        max_samples=MAX_SAMPLES,
+        start_indices=START_INDICES
     )
 
     print("\nStarting augmentation pipeline...")

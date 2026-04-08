@@ -388,3 +388,22 @@ class TopformerSeg(nn.Module):
             return logits, features
             
         return logits
+
+def print_topformer_granular(model):
+    tpm_params = sum(p.numel() for p in model.backbone.tpm.parameters()) / 1e6
+    ppa_params = sum(p.numel() for p in model.backbone.ppa.parameters()) / 1e6
+    trans_params = sum(p.numel() for p in model.backbone.trans.parameters()) / 1e6
+    sim_params = sum(p.numel() for p in model.backbone.SIM.parameters()) / 1e6
+    head_params = sum(p.numel() for p in model.decode_head.parameters()) / 1e6
+    total_params = sum(p.numel() for p in model.parameters()) / 1e6
+    
+    print(f"Token Pyramid Module: {tpm_params:.3f} M")
+    print(f"Pyramid Pool Agg: {ppa_params:.3f} M")
+    print(f"Transformer Blocks: {trans_params:.3f} M")
+    print(f"Injection Module (SIM): {sim_params:.3f} M")
+    print(f"Decode Head: {head_params:.3f} M")
+    print(f"Total: {total_params:.3f} M\n")
+
+if __name__ == "__main__":
+    model_top = TopformerSeg(num_classes=19)
+    print_topformer_granular(model_top)

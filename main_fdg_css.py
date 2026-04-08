@@ -28,9 +28,9 @@ wandb.login(key="wandb_v1_TSQDGbGQS91SJH5riSHNyE0W77N_xeWCfW2hyQpKWMY04waD2vgrot
 
 
 # ["fedavg", "fedsr", "feddg_ga", "feddg_elcfs", "fedomg", "gperxan", "sinobn_lab", "fedema", "our"]
-ALGORITHMS =  ["fedema"]
+ALGORITHMS =  ["fedomg"]
 
-MODEL_NAME = "topformer"  # "bisenetv2" or "topformer"
+MODEL_NAME = "bisenetv2"  # "bisenetv2" or "topformer"
 
 # Leave-One-Domain-Out Setup
 ALL_DOMAINS = ["cityscape", "gta5", "mapillary", "synthia", "bdd100"] 
